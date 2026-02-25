@@ -426,8 +426,21 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 	// 3. Save user message to session
 	agent.Sessions.AddMessage(opts.SessionKey, "user", opts.UserMessage)
 
-	// 4. Run LLM iteration loop
+	// 4. 智能模型路由：用简单模型判断任务难度，选择合适的模型
+	originalModel := agent.Model
+	if al.cfg.Agents.Defaults.ModelRouting != nil && al.cfg.Agents.Defaults.ModelRouting.Enabled {
+		routedModel := RouteModel(ctx, agent.Provider, opts.UserMessage, al.cfg.Agents.Defaults.ModelRouting)
+		if routedModel != "" && routedModel != agent.Model {
+			agent.Model = routedModel
+		}
+	}
+
+	// 5. Run LLM iteration loop
 	finalContent, iteration, err := al.runLLMIteration(ctx, agent, messages, opts)
+
+	// 恢复原始模型，避免影响后续请求
+	agent.Model = originalModel
+
 	if err != nil {
 		return "", err
 	}
