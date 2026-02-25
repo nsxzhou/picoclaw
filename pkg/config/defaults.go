@@ -17,6 +17,11 @@ func DefaultConfig() *Config {
 				MaxTokens:           8192,
 				Temperature:         nil, // nil means use provider default
 				MaxToolIterations:   20,
+				ModelRouting: &ModelRoutingConfig{
+					Enabled:      false,
+					SimpleModel:  "",
+					ComplexModel: "",
+				},
 			},
 		},
 		Bindings: []AgentBinding{},
