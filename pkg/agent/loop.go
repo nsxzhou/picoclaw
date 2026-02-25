@@ -149,9 +149,6 @@ func registerSharedTools(
 			return registry.CanSpawnSubagent(currentAgentID, targetAgentID)
 		})
 		agent.Tools.Register(spawnTool)
-
-		// Update context builder with the complete tools registry
-		agent.ContextBuilder.SetToolsRegistry(agent.Tools)
 	}
 }
 
@@ -537,8 +534,9 @@ func (al *AgentLoop) runLLMIteration(
 				fbResult, fbErr := al.fallback.Execute(ctx, agent.Candidates,
 					func(ctx context.Context, provider, model string) (*providers.LLMResponse, error) {
 						return agent.Provider.Chat(ctx, messages, providerToolDefs, model, map[string]any{
-							"max_tokens":  agent.MaxTokens,
-							"temperature": agent.Temperature,
+							"max_tokens":       agent.MaxTokens,
+							"temperature":      agent.Temperature,
+							"prompt_cache_key": agent.ID,
 						})
 					},
 				)
@@ -553,8 +551,9 @@ func (al *AgentLoop) runLLMIteration(
 				return fbResult.Response, nil
 			}
 			return agent.Provider.Chat(ctx, messages, providerToolDefs, agent.Model, map[string]any{
-				"max_tokens":  agent.MaxTokens,
-				"temperature": agent.Temperature,
+				"max_tokens":       agent.MaxTokens,
+				"temperature":      agent.Temperature,
+				"prompt_cache_key": agent.ID,
 			})
 		}
 
@@ -813,7 +812,7 @@ func (al *AgentLoop) forceCompression(agent *AgentInstance, sessionKey string) {
 	droppedCount := mid
 	keptConversation := conversation[mid:]
 
-	newHistory := make([]providers.Message, 0)
+	newHistory := make([]providers.Message, 0, 1+len(keptConversation)+1)
 
 	// Append compression note to the original system prompt instead of adding a new system message
 	// This avoids having two consecutive system messages which some APIs (like Zhipu) reject
@@ -975,8 +974,9 @@ func (al *AgentLoop) summarizeSession(agent *AgentInstance, sessionKey string) {
 			nil,
 			agent.Model,
 			map[string]any{
-				"max_tokens":  1024,
-				"temperature": 0.3,
+				"max_tokens":       1024,
+				"temperature":      0.3,
+				"prompt_cache_key": agent.ID,
 			},
 		)
 		if err == nil {
@@ -1025,8 +1025,9 @@ func (al *AgentLoop) summarizeBatch(
 		nil,
 		agent.Model,
 		map[string]any{
-			"max_tokens":  1024,
-			"temperature": 0.3,
+			"max_tokens":       1024,
+			"temperature":      0.3,
+			"prompt_cache_key": agent.ID,
 		},
 	)
 	if err != nil {
