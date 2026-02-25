@@ -1,21 +1,21 @@
-# Long-term Memory
+# 长期记忆
 
-This file stores important information that should persist across sessions.
+此文件用于存储应在不同会话中持久保存的重要信息。
 
-## User Information
+## 用户信息
 
-(Important facts about user)
+(关于用户的重要事实)
 
-## Preferences
+## 偏好设置
 
-(User preferences learned over time)
+(随时间推移了解到的用户偏好)
 
-## Important Notes
+## 重要笔记
 
-(Things to remember)
+(需要记住的事项)
 
-## Configuration
+## 配置
 
-- Model preferences
-- Channel settings
-- Skills enabled
+- 模型首选项
+- 渠道设置
+- 已启用的技能

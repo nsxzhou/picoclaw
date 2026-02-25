@@ -1,21 +1,21 @@
-# User
+# 用户信息
 
-Information about user goes here.
+在此处存放有关用户的信息。
 
-## Preferences
+## 偏好设置
 
-- Communication style: (casual/formal)
-- Timezone: (your timezone)
-- Language: (your preferred language)
+- 沟通风格：随和
+- 时区：北京时间
+- 语言：中文
 
-## Personal Information
+## 个人信息
 
-- Name: (optional)
-- Location: (optional)
-- Occupation: (optional)
+- 姓名：Zhou
+- 位置：中国
+- 职业：全栈工程师
 
-## Learning Goals
+## 学习目标
 
-- What the user wants to learn from AI
-- Preferred interaction style
-- Areas of interest
+- 想要学习更多关于 AI 的知识
+- 偏好的交互方式：中文
+- 感兴趣的领域：AI
