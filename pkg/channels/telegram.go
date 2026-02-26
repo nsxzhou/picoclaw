@@ -431,14 +431,14 @@ func markdownToTelegramHTML(text string) string {
 	inlineCodes := extractInlineCodes(text)
 	text = inlineCodes.text
 
-	// (?m) 使 ^ 匹配每一行的开头，而不只是整个字符串的开头
-	// 标题转为加粗文本
-	text = regexp.MustCompile(`(?m)^#{1,6}\s+(.+)$`).ReplaceAllString(text, "<b>$1</b>")
-
-	// 引用块添加 ❝ 前缀
+	// 先处理引用块的 > 符号（在 escapeHTML 之前，因为 > 会被转义）
 	text = regexp.MustCompile(`(?m)^>\s*(.*)$`).ReplaceAllString(text, "❝ $1")
 
 	text = escapeHTML(text)
+
+	// 以下转换都在 escapeHTML 之后，避免插入的 HTML 标签被转义
+	// 标题转为加粗文本
+	text = regexp.MustCompile(`(?m)^#{1,6}\s+(.+)$`).ReplaceAllString(text, "<b>$1</b>")
 
 	text = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`).ReplaceAllString(text, `<a href="$2">$1</a>`)
 
@@ -457,8 +457,8 @@ func markdownToTelegramHTML(text string) string {
 
 	text = regexp.MustCompile(`~~(.+?)~~`).ReplaceAllString(text, "<s>$1</s>")
 
-	// 列表项符号转换（匹配每一行）
-	text = regexp.MustCompile(`(?m)^[-*]\s+`).ReplaceAllString(text, "• ")
+	// 列表项符号转换（匹配每一行，包括缩进的列表项）
+	text = regexp.MustCompile(`(?m)^(\s*)[-*]\s+`).ReplaceAllString(text, "${1}• ")
 
 	for i, code := range inlineCodes.codes {
 		escaped := escapeHTML(code)
