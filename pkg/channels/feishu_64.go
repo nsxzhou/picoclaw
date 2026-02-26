@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -97,7 +99,9 @@ func (c *FeishuChannel) Send(ctx context.Context, msg bus.OutboundMessage) error
 		return fmt.Errorf("chat ID is empty")
 	}
 
-	payload, err := json.Marshal(map[string]string{"text": msg.Content})
+	// 将 Markdown 转换为飞书 Post 富文本格式
+	postContent := markdownToFeishuPost(msg.Content)
+	payload, err := json.Marshal(postContent)
 	if err != nil {
 		return fmt.Errorf("failed to marshal feishu content: %w", err)
 	}
@@ -106,7 +110,7 @@ func (c *FeishuChannel) Send(ctx context.Context, msg bus.OutboundMessage) error
 		ReceiveIdType(larkim.ReceiveIdTypeChatId).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
 			ReceiveId(msg.ChatID).
-			MsgType(larkim.MsgTypeText).
+			MsgType(larkim.MsgTypePost).
 			Content(string(payload)).
 			Uuid(fmt.Sprintf("picoclaw-%d", time.Now().UnixNano())).
 			Build()).
@@ -224,4 +228,239 @@ func stringValue(v *string) string {
 		return ""
 	}
 	return *v
+}
+
+// ===== Markdown → 飞书 Post 富文本转换 =====
+
+// feishuPostElement 表示飞书 Post 消息中的一个元素
+type feishuPostElement struct {
+	Tag      string   `json:"tag"`
+	Text     string   `json:"text,omitempty"`
+	Href     string   `json:"href,omitempty"`
+	Style    []string `json:"style,omitempty"`
+	Language string   `json:"language,omitempty"`
+}
+
+// feishuPostContent 是飞书 Post 消息的完整结构
+type feishuPostContent struct {
+	ZhCN *feishuPostBody `json:"zh_cn"`
+}
+
+type feishuPostBody struct {
+	Content [][]feishuPostElement `json:"content"`
+}
+
+// markdownToFeishuPost 将 Markdown 文本转换为飞书 Post 富文本结构
+func markdownToFeishuPost(text string) feishuPostContent {
+	if text == "" {
+		return feishuPostContent{ZhCN: &feishuPostBody{Content: [][]feishuPostElement{}}}
+	}
+
+	var paragraphs [][]feishuPostElement
+
+	// 提取代码块并用占位符替换
+	var codeBlocks []struct {
+		lang string
+		code string
+	}
+	codeBlockRe := regexp.MustCompile("(?s)```(\\w*)\n?(.*?)```")
+	cbIndex := 0
+	text = codeBlockRe.ReplaceAllStringFunc(text, func(m string) string {
+		matches := codeBlockRe.FindStringSubmatch(m)
+		lang := ""
+		code := ""
+		if len(matches) >= 3 {
+			lang = matches[1]
+			code = matches[2]
+		}
+		// 去掉尾部多余换行
+		code = strings.TrimRight(code, "\n")
+		codeBlocks = append(codeBlocks, struct {
+			lang string
+			code string
+		}{lang: lang, code: code})
+		placeholder := fmt.Sprintf("\x00CODEBLOCK_%d\x00", cbIndex)
+		cbIndex++
+		return placeholder
+	})
+
+	lines := strings.Split(text, "\n")
+	codeBlockPlaceholderRe := regexp.MustCompile(`\x00CODEBLOCK_(\d+)\x00`)
+
+	for _, line := range lines {
+		// 检查是否为代码块占位符
+		if m := codeBlockPlaceholderRe.FindStringSubmatch(line); len(m) == 2 {
+			var idx int
+			fmt.Sscanf(m[1], "%d", &idx)
+			if idx < len(codeBlocks) {
+				cb := codeBlocks[idx]
+				paragraphs = append(paragraphs, []feishuPostElement{{
+					Tag:      "code_block",
+					Language: cb.lang,
+					Text:     cb.code,
+				}})
+			}
+			continue
+		}
+
+		// 空行 → 空段落
+		if strings.TrimSpace(line) == "" {
+			paragraphs = append(paragraphs, []feishuPostElement{})
+			continue
+		}
+
+		// 标题 → 加粗文本
+		if m := regexp.MustCompile(`^#{1,6}\s+(.+)$`).FindStringSubmatch(line); len(m) == 2 {
+			elements := parseFeishuInline(m[1])
+			// 给所有元素追加 bold 样式
+			for i := range elements {
+				elements[i].Style = appendStyle(elements[i].Style, "bold")
+			}
+			paragraphs = append(paragraphs, elements)
+			continue
+		}
+
+		// 引用块 → 加 ❝ 前缀
+		if m := regexp.MustCompile(`^>\s*(.*)$`).FindStringSubmatch(line); len(m) == 2 {
+			inner := parseFeishuInline(m[1])
+			elements := []feishuPostElement{{Tag: "text", Text: "❝ "}}
+			elements = append(elements, inner...)
+			paragraphs = append(paragraphs, elements)
+			continue
+		}
+
+		// 列表项 → • 前缀
+		if m := regexp.MustCompile(`^(\s*)[-*]\s+(.+)$`).FindStringSubmatch(line); len(m) == 3 {
+			indent := m[1]
+			inner := parseFeishuInline(m[2])
+			elements := []feishuPostElement{{Tag: "text", Text: indent + "• "}}
+			elements = append(elements, inner...)
+			paragraphs = append(paragraphs, elements)
+			continue
+		}
+
+		// 有序列表
+		if m := regexp.MustCompile(`^(\s*)\d+\.\s+(.+)$`).FindStringSubmatch(line); len(m) == 3 {
+			indent := m[1]
+			inner := parseFeishuInline(m[2])
+			// 保留原始数字编号
+			numMatch := regexp.MustCompile(`^(\s*)(\d+)\.\s+`).FindStringSubmatch(line)
+			prefix := indent + numMatch[2] + ". "
+			elements := []feishuPostElement{{Tag: "text", Text: prefix}}
+			elements = append(elements, inner...)
+			paragraphs = append(paragraphs, elements)
+			continue
+		}
+
+		// 普通行 → 解析行内格式
+		paragraphs = append(paragraphs, parseFeishuInline(line))
+	}
+
+	return feishuPostContent{
+		ZhCN: &feishuPostBody{Content: paragraphs},
+	}
+}
+
+// parseFeishuInline 解析一行文本中的行内 Markdown 格式
+func parseFeishuInline(text string) []feishuPostElement {
+	if text == "" {
+		return []feishuPostElement{{Tag: "text", Text: ""}}
+	}
+
+	// 定义行内模式的正则（按优先级排列）
+	// 匹配: 行内代码、链接、加粗、斜体、删除线
+	pattern := regexp.MustCompile(
+		"`([^`]+)`" + // 行内代码
+			`|\[([^\]]+)\]\(([^)]+)\)` + // 链接
+			`|\*\*(.+?)\*\*` + // 加粗 **
+			`|__(.+?)__` + // 加粗 __
+			`|\*([^*]+)\*` + // 斜体 *
+			`|_([^_]+)_` + // 斜体 _
+			`|~~(.+?)~~`, // 删除线
+	)
+
+	var elements []feishuPostElement
+	lastIndex := 0
+
+	for _, loc := range pattern.FindAllStringSubmatchIndex(text, -1) {
+		// 匹配前的普通文本
+		if loc[0] > lastIndex {
+			elements = append(elements, feishuPostElement{
+				Tag:  "text",
+				Text: text[lastIndex:loc[0]],
+			})
+		}
+
+		// 按 submatch 判断实际匹配的是哪种模式
+		switch {
+		case loc[2] >= 0 && loc[3] >= 0: // 行内代码 `code`
+			elements = append(elements, feishuPostElement{
+				Tag:   "text",
+				Text:  text[loc[2]:loc[3]],
+				Style: []string{"code_inline"},
+			})
+		case loc[4] >= 0 && loc[5] >= 0: // 链接 [text](url)
+			elements = append(elements, feishuPostElement{
+				Tag:  "a",
+				Text: text[loc[4]:loc[5]],
+				Href: text[loc[6]:loc[7]],
+			})
+		case loc[8] >= 0 && loc[9] >= 0: // 加粗 **text**
+			elements = append(elements, feishuPostElement{
+				Tag:   "text",
+				Text:  text[loc[8]:loc[9]],
+				Style: []string{"bold"},
+			})
+		case loc[10] >= 0 && loc[11] >= 0: // 加粗 __text__
+			elements = append(elements, feishuPostElement{
+				Tag:   "text",
+				Text:  text[loc[10]:loc[11]],
+				Style: []string{"bold"},
+			})
+		case loc[12] >= 0 && loc[13] >= 0: // 斜体 *text*
+			elements = append(elements, feishuPostElement{
+				Tag:   "text",
+				Text:  text[loc[12]:loc[13]],
+				Style: []string{"italic"},
+			})
+		case loc[14] >= 0 && loc[15] >= 0: // 斜体 _text_
+			elements = append(elements, feishuPostElement{
+				Tag:   "text",
+				Text:  text[loc[14]:loc[15]],
+				Style: []string{"italic"},
+			})
+		case loc[16] >= 0 && loc[17] >= 0: // 删除线 ~~text~~
+			elements = append(elements, feishuPostElement{
+				Tag:   "text",
+				Text:  text[loc[16]:loc[17]],
+				Style: []string{"strikethrough"},
+			})
+		}
+
+		lastIndex = loc[1]
+	}
+
+	// 剩余的普通文本
+	if lastIndex < len(text) {
+		elements = append(elements, feishuPostElement{
+			Tag:  "text",
+			Text: text[lastIndex:],
+		})
+	}
+
+	if len(elements) == 0 {
+		return []feishuPostElement{{Tag: "text", Text: text}}
+	}
+
+	return elements
+}
+
+// appendStyle 追加样式（去重）
+func appendStyle(styles []string, style string) []string {
+	for _, s := range styles {
+		if s == style {
+			return styles
+		}
+	}
+	return append(styles, style)
 }
