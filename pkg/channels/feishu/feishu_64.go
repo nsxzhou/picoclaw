@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
+	"github.com/sipeed/picoclaw/pkg/attachments"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -43,6 +45,11 @@ func NewFeishuChannel(cfg config.FeishuConfig, bus *bus.MessageBus) (*FeishuChan
 		config:      cfg,
 		client:      lark.NewClient(cfg.AppID, cfg.AppSecret),
 	}, nil
+}
+
+// NewFileRefResolver returns a resolver that downloads Feishu files on demand.
+func (c *FeishuChannel) NewFileRefResolver() *FeishuFileRefResolver {
+	return NewFeishuFileRefResolver(c.client)
 }
 
 func (c *FeishuChannel) Start(ctx context.Context) error {
@@ -151,18 +158,64 @@ func (c *FeishuChannel) handleMessageReceive(ctx context.Context, event *larkim.
 		senderID = "unknown"
 	}
 
-	content := extractFeishuMessageContent(message)
+	msgType := stringValue(message.MessageType)
+	content := ""
+	var fileRefs []bus.FileRef
+
+	messageID := stringValue(message.MessageId)
+
+	switch msgType {
+	case "text":
+		content = extractFeishuTextContent(message)
+	case "image":
+		imageKey := extractFeishuImageKey(message)
+		if imageKey != "" && messageID != "" {
+			fileRefs = append(fileRefs, bus.FileRef{
+				Name:            "feishu_image.jpg",
+				MediaType:       "application/octet-stream",
+				Kind:            bus.AttachmentKindImage,
+				Source:          bus.FileRefSourceFeishu,
+				FeishuMessageID: messageID,
+				FeishuFileKey:   imageKey,
+				FeishuResType:   "image",
+			})
+			content = "[image: photo]"
+		} else {
+			content = "[image: missing key or message_id]"
+		}
+	case "file":
+		fileKey, fileName := extractFeishuFileInfo(message)
+		if fileName == "" {
+			fileName = "feishu_file"
+		}
+		if fileKey != "" && messageID != "" {
+			fileRefs = append(fileRefs, bus.FileRef{
+				Name:            fileName,
+				MediaType:       attachments.InferMediaTypeFromName(fileName),
+				Kind:            attachments.InferAttachmentKindFromName(fileName),
+				Source:          bus.FileRefSourceFeishu,
+				FeishuMessageID: messageID,
+				FeishuFileKey:   fileKey,
+				FeishuResType:   "file",
+			})
+			content = fmt.Sprintf("[file: %s]", fileName)
+		} else {
+			content = "[file: missing key or message_id]"
+		}
+	default:
+		content = extractFeishuTextContent(message)
+		if strings.TrimSpace(content) == "" {
+			content = fmt.Sprintf("[unsupported message type: %s]", msgType)
+		}
+	}
+
 	if content == "" {
 		content = "[empty message]"
 	}
 
 	metadata := map[string]string{}
-	messageID := ""
-	if mid := stringValue(message.MessageId); mid != "" {
-		messageID = mid
-	}
-	if messageType := stringValue(message.MessageType); messageType != "" {
-		metadata["message_type"] = messageType
+	if msgType != "" {
+		metadata["message_type"] = msgType
 	}
 	if chatType := stringValue(message.ChatType); chatType != "" {
 		metadata["chat_type"] = chatType
@@ -186,9 +239,10 @@ func (c *FeishuChannel) handleMessageReceive(ctx context.Context, event *larkim.
 	}
 
 	logger.InfoCF("feishu", "Feishu message received", map[string]any{
-		"sender_id": senderID,
-		"chat_id":   chatID,
-		"preview":   utils.Truncate(content, 80),
+		"sender_id":    senderID,
+		"chat_id":      chatID,
+		"message_type": msgType,
+		"preview":      utils.Truncate(content, 80),
 	})
 
 	senderInfo := bus.SenderInfo{
@@ -201,7 +255,12 @@ func (c *FeishuChannel) handleMessageReceive(ctx context.Context, event *larkim.
 		return nil
 	}
 
-	c.HandleMessage(ctx, peer, messageID, senderID, chatID, content, nil, metadata, senderInfo)
+	if len(fileRefs) > 0 {
+		c.HandleMessageWithFileRefs(ctx, peer, messageID, senderID, chatID, content, nil, fileRefs, metadata, senderInfo)
+	} else {
+		c.HandleMessage(ctx, peer, messageID, senderID, chatID, content, nil, metadata, senderInfo)
+	}
+
 	return nil
 }
 
@@ -223,19 +282,47 @@ func extractFeishuSenderID(sender *larkim.EventSender) string {
 	return ""
 }
 
-func extractFeishuMessageContent(message *larkim.EventMessage) string {
+func extractFeishuTextContent(message *larkim.EventMessage) string {
 	if message == nil || message.Content == nil || *message.Content == "" {
 		return ""
 	}
 
-	if message.MessageType != nil && *message.MessageType == larkim.MsgTypeText {
-		var textPayload struct {
-			Text string `json:"text"`
-		}
-		if err := json.Unmarshal([]byte(*message.Content), &textPayload); err == nil {
-			return textPayload.Text
-		}
+	var textPayload struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(*message.Content), &textPayload); err == nil {
+		return textPayload.Text
 	}
 
 	return *message.Content
+}
+
+func extractFeishuImageKey(message *larkim.EventMessage) string {
+	if message == nil || message.Content == nil || *message.Content == "" {
+		return ""
+	}
+
+	var imagePayload struct {
+		ImageKey string `json:"image_key"`
+	}
+	if err := json.Unmarshal([]byte(*message.Content), &imagePayload); err == nil {
+		return imagePayload.ImageKey
+	}
+	return ""
+}
+
+func extractFeishuFileInfo(message *larkim.EventMessage) (fileKey, fileName string) {
+	if message == nil || message.Content == nil || *message.Content == "" {
+		return "", ""
+	}
+
+	var filePayload struct {
+		FileKey  string `json:"file_key"`
+		FileName string `json:"file_name"`
+	}
+	if err := json.Unmarshal([]byte(*message.Content), &filePayload); err == nil {
+		return filePayload.FileKey, filePayload.FileName
+	}
+
+	return "", ""
 }
