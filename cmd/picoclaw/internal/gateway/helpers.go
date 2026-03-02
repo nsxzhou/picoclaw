@@ -113,6 +113,14 @@ func gatewayCmd(debug bool) error {
 	// Inject channel manager into agent loop for command handling
 	agentLoop.SetChannelManager(channelManager)
 
+	// Register FeishuFileRefResolver if Feishu channel is active
+	if feishuChannel, ok := channelManager.GetChannel("feishu"); ok {
+		if fc, ok := feishuChannel.(*channels.FeishuChannel); ok {
+			agentLoop.SetFileRefResolver(fc.NewFileRefResolver())
+			logger.InfoC("feishu", "FeishuFileRefResolver registered to all agents")
+		}
+	}
+
 	var transcriber *voice.GroqTranscriber
 	groqAPIKey := cfg.Providers.Groq.APIKey
 	if groqAPIKey == "" {
