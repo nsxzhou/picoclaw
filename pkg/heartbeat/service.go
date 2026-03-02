@@ -251,28 +251,28 @@ If there is nothing that requires attention, respond ONLY with: HEARTBEAT_OK
 func (hs *HeartbeatService) createDefaultHeartbeatTemplate() {
 	heartbeatPath := filepath.Join(hs.workspace, "HEARTBEAT.md")
 
-	defaultContent := `# Heartbeat Check List
+	defaultContent := `# 心跳检查列表（Heartbeat Check List）
 
-This file contains tasks for the heartbeat service to check periodically.
+这是一个供心跳服务定期读取和检查的任务文件。
 
-## Examples
+## 示例
 
-- Check for unread messages
-- Review upcoming calendar events
-- Check device status (e.g., MaixCam)
+- 检查是否有未读消息
+- 查看近期日程安排
+- 检查设备运行状态 (例如 MaixCam 等)
 
-## Instructions
+## 指令说明
 
-- Execute ALL tasks listed below. Do NOT skip any task.
-- For simple tasks (e.g., report current time), respond directly.
-- For complex tasks that may take time, use the spawn tool to create a subagent.
-- The spawn tool is async - subagent results will be sent to the user automatically.
-- After spawning a subagent, CONTINUE to process remaining tasks.
-- Only respond with HEARTBEAT_OK when ALL tasks are done AND nothing needs attention.
+- 请执行下方列出的**所有**任务。不可跳过任何任务。
+- 对于简单的任务（例如播报当前时间），请直接回复。
+- 对于耗时较长的复杂任务，请使用 spawn 工具创建一个子代理（subagent）来完成。
+- spawn 工具是异步的——子代理的执行结果会自动发送给用户。
+- 派生（spawn）子代理后，请**继续**处理余下的任务。
+- 只有当所有任务均已执行，且没有任何需要额外注意的情况时，才回复唯一文本：HEARTBEAT_OK
 
 ---
 
-Add your heartbeat tasks below this line:
+请在此线下方添加你的心跳任务：
 `
 
 	if err := os.WriteFile(heartbeatPath, []byte(defaultContent), 0o644); err != nil {
