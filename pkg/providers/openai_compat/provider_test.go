@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 func TestProviderChat_UsesMaxCompletionTokensForGLM(t *testing.T) {
@@ -314,6 +316,109 @@ func TestProviderChat_AcceptsNumericOptionTypes(t *testing.T) {
 	}
 	if requestBody["temperature"] != float64(1) {
 		t.Fatalf("temperature = %v, want 1", requestBody["temperature"])
+	}
+}
+
+func TestStripSystemParts_TextOnlyMessage(t *testing.T) {
+	messages := []Message{
+		{
+			Role:    "user",
+			Content: "hello",
+		},
+	}
+
+	out := stripSystemParts(messages)
+	if len(out) != 1 {
+		t.Fatalf("len(out) = %d, want 1", len(out))
+	}
+
+	content, ok := out[0].Content.(string)
+	if !ok {
+		t.Fatalf("content type = %T, want string", out[0].Content)
+	}
+	if content != "hello" {
+		t.Fatalf("content = %q, want %q", content, "hello")
+	}
+}
+
+func TestStripSystemParts_MultimodalMessage(t *testing.T) {
+	messages := []Message{
+		{
+			Role:    "user",
+			Content: "describe this",
+			Images: []protocoltypes.ImageBlock{
+				{
+					MediaType: "image/png",
+					Data:      "YWJj",
+				},
+			},
+		},
+	}
+
+	out := stripSystemParts(messages)
+	if len(out) != 1 {
+		t.Fatalf("len(out) = %d, want 1", len(out))
+	}
+
+	parts, ok := out[0].Content.([]openaiContentPart)
+	if !ok {
+		t.Fatalf("content type = %T, want []openaiContentPart", out[0].Content)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("len(parts) = %d, want 2", len(parts))
+	}
+
+	if parts[0].Type != "image_url" {
+		t.Fatalf("parts[0].Type = %q, want %q", parts[0].Type, "image_url")
+	}
+	if parts[0].ImageURL == nil {
+		t.Fatal("parts[0].ImageURL = nil, want non-nil")
+	}
+	if parts[0].ImageURL.URL != "data:image/png;base64,YWJj" {
+		t.Fatalf("image data uri = %q, want %q", parts[0].ImageURL.URL, "data:image/png;base64,YWJj")
+	}
+
+	if parts[1].Type != "text" {
+		t.Fatalf("parts[1].Type = %q, want %q", parts[1].Type, "text")
+	}
+	if parts[1].Text != "describe this" {
+		t.Fatalf("parts[1].Text = %q, want %q", parts[1].Text, "describe this")
+	}
+}
+
+func TestStripSystemParts_ImageOnlyMessage(t *testing.T) {
+	messages := []Message{
+		{
+			Role: "user",
+			Images: []protocoltypes.ImageBlock{
+				{
+					MediaType: "image/jpeg",
+					Data:      "Zm9v",
+				},
+			},
+		},
+	}
+
+	out := stripSystemParts(messages)
+	if len(out) != 1 {
+		t.Fatalf("len(out) = %d, want 1", len(out))
+	}
+
+	parts, ok := out[0].Content.([]openaiContentPart)
+	if !ok {
+		t.Fatalf("content type = %T, want []openaiContentPart", out[0].Content)
+	}
+	if len(parts) != 1 {
+		t.Fatalf("len(parts) = %d, want 1", len(parts))
+	}
+	if parts[0].Type != "image_url" {
+		t.Fatalf("parts[0].Type = %q, want %q", parts[0].Type, "image_url")
+	}
+	if parts[0].ImageURL == nil {
+		t.Fatal("parts[0].ImageURL = nil, want non-nil")
+	}
+	if parts[0].ImageURL.URL != "data:image/jpeg;base64,Zm9v" {
+		t.Fatalf("image data uri = %q, want %q", parts[0].ImageURL.URL, "data:image/jpeg;base64,Zm9v")
 	}
 }
 

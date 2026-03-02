@@ -132,6 +132,29 @@ func buildParams(
 				anthropicMessages = append(anthropicMessages,
 					anthropic.NewUserMessage(anthropic.NewToolResultBlock(msg.ToolCallID, msg.Content, false)),
 				)
+			} else if len(msg.Images) > 0 || len(msg.Files) > 0 {
+				// Multimodal: image blocks + document blocks + text block
+				var blocks []anthropic.ContentBlockParamUnion
+				for _, img := range msg.Images {
+					blocks = append(blocks, anthropic.NewImageBlockBase64(img.MediaType, img.Data))
+				}
+				for _, f := range msg.Files {
+					if f.MediaType == "application/pdf" {
+						blocks = append(blocks, anthropic.NewDocumentBlock(
+							anthropic.Base64PDFSourceParam{Data: f.Data},
+						))
+					} else {
+						// Non-PDF files: Anthropic only supports PDF natively.
+						// Append a text note so the model knows a file was attached.
+						blocks = append(blocks, anthropic.NewTextBlock(
+							fmt.Sprintf("[file: %s (%s) — not supported by this provider, content omitted]", f.Name, f.MediaType),
+						))
+					}
+				}
+				if msg.Content != "" {
+					blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
+				}
+				anthropicMessages = append(anthropicMessages, anthropic.NewUserMessage(blocks...))
 			} else {
 				anthropicMessages = append(anthropicMessages,
 					anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)),
