@@ -53,11 +53,40 @@ type ContentBlock struct {
 	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }
 
+// ImageBlock carries a base64-encoded image for multimodal LLM requests.
+type ImageBlock struct {
+	MediaType string `json:"media_type"` // e.g. "image/jpeg", "image/png"
+	Data      string `json:"data"`       // base64-encoded image data
+}
+
+// FileBlock carries a base64-encoded file for multimodal LLM requests.
+// Used for documents (PDF, DOCX, etc.) that the model can process natively.
+type FileBlock struct {
+	Name      string `json:"name"`
+	MediaType string `json:"media_type"` // e.g. "application/pdf"
+	Data      string `json:"data"`       // base64-encoded file data
+}
+
+// FileRefMeta is the serializable metadata of a FileRef, stored in session history.
+// It contains enough information to reconstruct a bus.FileRef for re-resolution.
+type FileRefMeta struct {
+	Name            string `json:"name"`
+	MediaType       string `json:"media_type"`
+	Kind            string `json:"kind"`
+	Source          string `json:"source"`
+	FeishuMessageID string `json:"feishu_message_id,omitempty"`
+	FeishuFileKey   string `json:"feishu_file_key,omitempty"`
+	FeishuResType   string `json:"feishu_res_type,omitempty"`
+}
+
 type Message struct {
 	Role             string         `json:"role"`
 	Content          string         `json:"content"`
 	ReasoningContent string         `json:"reasoning_content,omitempty"`
 	SystemParts      []ContentBlock `json:"system_parts,omitempty"` // structured system blocks for cache-aware adapters
+	Images           []ImageBlock   `json:"images,omitempty"`       // multimodal image attachments
+	Files            []FileBlock    `json:"files,omitempty"`        // multimodal file attachments (PDF, DOCX, etc.)
+	FileRefs         []FileRefMeta  `json:"file_refs,omitempty"`    // lazy file references for session persistence
 	ToolCalls        []ToolCall     `json:"tool_calls,omitempty"`
 	ToolCallID       string         `json:"tool_call_id,omitempty"`
 }
