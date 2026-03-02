@@ -288,24 +288,76 @@ func parseResponse(body []byte) (*LLMResponse, error) {
 // openaiMessage is the wire-format message for OpenAI-compatible APIs.
 // It mirrors protocoltypes.Message but omits SystemParts, which is an
 // internal field that would be unknown to third-party endpoints.
+// Content is `any` to support both plain string and multimodal content parts array.
 type openaiMessage struct {
 	Role       string     `json:"role"`
-	Content    string     `json:"content"`
+	Content    any        `json:"content"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+// openaiContentPart represents a single part in a multimodal content array.
+type openaiContentPart struct {
+	Type     string            `json:"type"`
+	Text     string            `json:"text,omitempty"`
+	ImageURL *openaiImageURL   `json:"image_url,omitempty"`
+	File     *openaiFileInline `json:"file,omitempty"`
+}
+
+// openaiImageURL holds a base64 data URI for an inline image.
+type openaiImageURL struct {
+	URL string `json:"url"`
+}
+
+// openaiFileInline holds an inline base64 file for the OpenAI file content part.
+// See: https://platform.openai.com/docs/guides/pdf-files
+type openaiFileInline struct {
+	Data     string `json:"data"` // "data:<mime>;base64,..."
+	Filename string `json:"filename"`
 }
 
 // stripSystemParts converts []Message to []openaiMessage, dropping the
 // SystemParts field so it doesn't leak into the JSON payload sent to
 // OpenAI-compatible APIs (some strict endpoints reject unknown fields).
+// When a message carries Images or Files, Content is serialized as a content
+// parts array (vision/file API format) instead of a plain string.
 func stripSystemParts(messages []Message) []openaiMessage {
 	out := make([]openaiMessage, len(messages))
 	for i, m := range messages {
 		out[i] = openaiMessage{
 			Role:       m.Role,
-			Content:    m.Content,
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
+		}
+		if len(m.Images) > 0 || len(m.Files) > 0 {
+			// Multimodal: build content parts array
+			parts := make([]openaiContentPart, 0, len(m.Images)+len(m.Files)+1)
+			for _, img := range m.Images {
+				parts = append(parts, openaiContentPart{
+					Type: "image_url",
+					ImageURL: &openaiImageURL{
+						URL: "data:" + img.MediaType + ";base64," + img.Data,
+					},
+				})
+			}
+			for _, f := range m.Files {
+				parts = append(parts, openaiContentPart{
+					Type: "file",
+					File: &openaiFileInline{
+						Data:     "data:" + f.MediaType + ";base64," + f.Data,
+						Filename: f.Name,
+					},
+				})
+			}
+			if m.Content != "" {
+				parts = append(parts, openaiContentPart{
+					Type: "text",
+					Text: m.Content,
+				})
+			}
+			out[i].Content = parts
+		} else {
+			out[i].Content = m.Content
 		}
 	}
 	return out
