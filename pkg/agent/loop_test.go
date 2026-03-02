@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -839,4 +840,202 @@ func TestHandleReasoning(t *testing.T) {
 			t.Fatal("expected reasoning message to be dropped when bus is full, but it was published")
 		}
 	})
+}
+
+func TestBuildHistorySafeUserMessage_WithAttachments(t *testing.T) {
+	rawUser := "please analyze files"
+	attachments := []bus.Attachment{
+		{
+			Name:        "report.txt",
+			MediaType:   "text/plain",
+			SizeBytes:   12,
+			TextContent: "sensitive file content",
+		},
+		{
+			Name:      "photo.jpg",
+			MediaType: "image/jpeg",
+			SizeBytes: 2048,
+		},
+	}
+	attachmentErrors := []bus.AttachmentError{
+		{
+			Name:        "large.pdf",
+			Code:        "file_too_large",
+			UserMessage: "Attachment \"large.pdf\" is too large to parse.",
+		},
+	}
+
+	got := buildHistorySafeUserMessage(rawUser, attachments, attachmentErrors, nil)
+	if !strings.Contains(got, rawUser) {
+		t.Fatalf("result does not contain original user message: %q", got)
+	}
+	if !strings.Contains(got, "[attachment summary]") {
+		t.Fatalf("result does not contain attachment summary marker: %q", got)
+	}
+	if strings.Contains(got, "sensitive file content") {
+		t.Fatalf("result should not include attachment raw content: %q", got)
+	}
+	if !strings.Contains(got, "report.txt") || !strings.Contains(got, "photo.jpg") {
+		t.Fatalf("result does not contain attachment metadata: %q", got)
+	}
+	if !strings.Contains(got, "[error] large.pdf") {
+		t.Fatalf("result does not contain attachment error summary: %q", got)
+	}
+}
+
+func TestRunAgentLoop_PersistsFileRefsInSession(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				Model:             "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	provider := &simpleMockProvider{response: "done"}
+	al := NewAgentLoop(cfg, msgBus, provider)
+
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("No default agent found")
+	}
+
+	fileRefs := []bus.FileRef{
+		{
+			Name:            "report.pdf",
+			MediaType:       "application/pdf",
+			Kind:            bus.AttachmentKindDocument,
+			Source:          bus.FileRefSourceFeishu,
+			FeishuMessageID: "om_123",
+			FeishuFileKey:   "file_123",
+			FeishuResType:   "file",
+		},
+	}
+
+	_, err = al.runAgentLoop(context.Background(), agent, processOptions{
+		SessionKey:      "test-session-file-refs",
+		Channel:         "feishu",
+		ChatID:          "chat1",
+		UserMessage:     "please analyze attached file",
+		FileRefs:        fileRefs,
+		DefaultResponse: "fallback",
+		EnableSummary:   false,
+		SendResponse:    false,
+	})
+	if err != nil {
+		t.Fatalf("runAgentLoop() failed: %v", err)
+	}
+
+	history := agent.Sessions.GetHistory("test-session-file-refs")
+	if len(history) < 2 {
+		t.Fatalf("history len = %d, want at least 2", len(history))
+	}
+
+	userMsg := history[0]
+	if userMsg.Role != "user" {
+		t.Fatalf("history[0].Role = %q, want user", userMsg.Role)
+	}
+	if len(userMsg.FileRefs) != 1 {
+		t.Fatalf("len(history[0].FileRefs) = %d, want 1", len(userMsg.FileRefs))
+	}
+	if userMsg.FileRefs[0].FeishuFileKey != "file_123" {
+		t.Fatalf("persisted file key = %q, want %q", userMsg.FileRefs[0].FeishuFileKey, "file_123")
+	}
+}
+
+func TestShouldInjectCurrentUserAfterCompression_AlreadyInHistory(t *testing.T) {
+	opts := processOptions{
+		UserMessage: "please analyze attached file",
+		Attachments: []bus.Attachment{
+			{
+				Name:      "notes.txt",
+				MediaType: "text/plain",
+				SizeBytes: 12,
+			},
+		},
+		AttachmentErrors: []bus.AttachmentError{
+			{
+				Name:        "broken.pdf",
+				Code:        "parse_failed",
+				UserMessage: "Attachment parse failed",
+			},
+		},
+		FileRefs: []bus.FileRef{
+			{
+				Name:            "report.pdf",
+				MediaType:       "application/pdf",
+				Kind:            bus.AttachmentKindDocument,
+				Source:          bus.FileRefSourceFeishu,
+				FeishuMessageID: "om_1",
+				FeishuFileKey:   "file_1",
+				FeishuResType:   "file",
+			},
+		},
+	}
+
+	expectedUserContent := buildHistorySafeUserMessage(
+		opts.UserMessage,
+		opts.Attachments,
+		opts.AttachmentErrors,
+		opts.FileRefs,
+	)
+
+	history := []providers.Message{
+		{Role: "system", Content: "system"},
+		{
+			Role:    "user",
+			Content: expectedUserContent,
+			FileRefs: []providers.FileRefMeta{
+				{
+					Name:            "report.pdf",
+					MediaType:       "application/pdf",
+					Kind:            string(bus.AttachmentKindDocument),
+					Source:          string(bus.FileRefSourceFeishu),
+					FeishuMessageID: "om_1",
+					FeishuFileKey:   "file_1",
+					FeishuResType:   "file",
+				},
+			},
+		},
+	}
+
+	if got := shouldInjectCurrentUserAfterCompression(history, opts); got {
+		t.Fatal("shouldInjectCurrentUserAfterCompression() = true, want false")
+	}
+}
+
+func TestShouldInjectCurrentUserAfterCompression_MissingFromHistory(t *testing.T) {
+	opts := processOptions{
+		UserMessage: "please analyze attached file",
+		FileRefs: []bus.FileRef{
+			{
+				Name:            "report.pdf",
+				MediaType:       "application/pdf",
+				Kind:            bus.AttachmentKindDocument,
+				Source:          bus.FileRefSourceFeishu,
+				FeishuMessageID: "om_1",
+				FeishuFileKey:   "file_1",
+				FeishuResType:   "file",
+			},
+		},
+	}
+
+	history := []providers.Message{
+		{Role: "system", Content: "system"},
+		{Role: "user", Content: "other user message"},
+	}
+
+	if got := shouldInjectCurrentUserAfterCompression(history, opts); !got {
+		t.Fatal("shouldInjectCurrentUserAfterCompression() = false, want true")
+	}
 }

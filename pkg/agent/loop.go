@@ -46,14 +46,18 @@ type AgentLoop struct {
 
 // processOptions configures how a message is processed
 type processOptions struct {
-	SessionKey      string // Session identifier for history/context
-	Channel         string // Target channel for tool execution
-	ChatID          string // Target chat ID for tool execution
-	UserMessage     string // User message content (may include prefix)
-	DefaultResponse string // Response when LLM returns empty
-	EnableSummary   bool   // Whether to trigger summarization
-	SendResponse    bool   // Whether to send response via bus
-	NoHistory       bool   // If true, don't load session history (for heartbeat)
+	SessionKey       string                // Session identifier for history/context
+	Channel          string                // Target channel for tool execution
+	ChatID           string                // Target chat ID for tool execution
+	UserMessage      string                // User message content (may include prefix)
+	Images           []bus.EncodedImage    // Base64-encoded images from the channel layer
+	Attachments      []bus.Attachment      // Parsed media attachments from the channel layer
+	AttachmentErrors []bus.AttachmentError // Attachment parse failures (user-visible context)
+	FileRefs         []bus.FileRef         // Lazy file references (Feishu etc.), resolved on demand
+	DefaultResponse  string                // Response when LLM returns empty
+	EnableSummary    bool                  // Whether to trigger summarization
+	SendResponse     bool                  // Whether to send response via bus
+	NoHistory        bool                  // If true, don't load session history (for heartbeat)
 }
 
 const defaultResponse = "I've completed processing but have no response to give. Increase `max_tool_iterations` in config.json."
@@ -292,6 +296,16 @@ func inferMediaType(filename, contentType string) string {
 	return "file"
 }
 
+// SetFileRefResolver registers a FileRefResolver on all agents' ContextBuilders.
+// Called by the gateway when a channel that supports lazy file references is active.
+func (al *AgentLoop) SetFileRefResolver(r FileRefResolver) {
+	for _, agentID := range al.registry.ListAgentIDs() {
+		if agent, ok := al.registry.GetAgent(agentID); ok {
+			agent.ContextBuilder.SetFileRefResolver(r)
+		}
+	}
+}
+
 // RecordLastChannel records the last active channel for this workspace.
 // This uses the atomic state save mechanism to prevent data loss on crash.
 func (al *AgentLoop) RecordLastChannel(channel string) error {
@@ -413,13 +427,17 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		})
 
 	return al.runAgentLoop(ctx, agent, processOptions{
-		SessionKey:      sessionKey,
-		Channel:         msg.Channel,
-		ChatID:          msg.ChatID,
-		UserMessage:     msg.Content,
-		DefaultResponse: defaultResponse,
-		EnableSummary:   true,
-		SendResponse:    false,
+		SessionKey:       sessionKey,
+		Channel:          msg.Channel,
+		ChatID:           msg.ChatID,
+		UserMessage:      msg.Content,
+		Images:           msg.EncodedImages,
+		Attachments:      msg.Attachments,
+		AttachmentErrors: msg.AttachmentErrors,
+		FileRefs:         msg.FileRefs,
+		DefaultResponse:  defaultResponse,
+		EnableSummary:    true,
+		SendResponse:     false,
 	})
 }
 
@@ -506,16 +524,25 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 		summary = agent.Sessions.GetSummary(opts.SessionKey)
 	}
 	messages := agent.ContextBuilder.BuildMessages(
+		ctx,
 		history,
 		summary,
 		opts.UserMessage,
-		nil,
+		opts.Images,
+		opts.Attachments,
+		opts.AttachmentErrors,
+		opts.FileRefs,
 		opts.Channel,
 		opts.ChatID,
 	)
 
-	// 3. Save user message to session
-	agent.Sessions.AddMessage(opts.SessionKey, "user", opts.UserMessage)
+	// 3. Save user message to session（历史持久化使用瘦身版，避免附件全文撑爆会话）
+	userMessageForHistory := buildHistorySafeUserMessage(opts.UserMessage, opts.Attachments, opts.AttachmentErrors, opts.FileRefs)
+	agent.Sessions.AddFullMessage(opts.SessionKey, providers.Message{
+		Role:     "user",
+		Content:  userMessageForHistory,
+		FileRefs: toFileRefMeta(opts.FileRefs),
+	})
 
 	// 4. Run LLM iteration loop
 	finalContent, iteration, err := al.runLLMIteration(ctx, agent, messages, opts)
@@ -613,6 +640,118 @@ func (al *AgentLoop) handleReasoning(ctx context.Context, reasoningContent, chan
 			})
 		}
 	}
+}
+
+func buildHistorySafeUserMessage(
+	rawUser string,
+	attachments []bus.Attachment,
+	attachmentErrors []bus.AttachmentError,
+	fileRefs []bus.FileRef,
+) string {
+	trimmedUser := strings.TrimSpace(rawUser)
+	if len(attachments) == 0 && len(attachmentErrors) == 0 && len(fileRefs) == 0 {
+		return rawUser
+	}
+
+	lines := make([]string, 0, len(attachments)+len(attachmentErrors)+len(fileRefs)+4)
+	lines = append(lines, "[attachment summary]")
+
+	for _, attachment := range attachments {
+		status := "received"
+		if attachment.TextContent != "" {
+			status = "parsed"
+		}
+		lines = append(lines,
+			fmt.Sprintf("- %s (%s, %s): %s",
+				attachment.Name,
+				attachment.MediaType,
+				formatAttachmentSizeHuman(attachment.SizeBytes),
+				status,
+			))
+	}
+
+	for _, ref := range fileRefs {
+		lines = append(lines,
+			fmt.Sprintf("- %s (%s, %s): file_ref[%s]",
+				ref.Name,
+				ref.MediaType,
+				string(ref.Kind),
+				string(ref.Source),
+			))
+	}
+
+	for _, attachmentErr := range attachmentErrors {
+		lines = append(lines, fmt.Sprintf("- [error] %s: %s", attachmentErr.Name, attachmentErr.UserMessage))
+	}
+
+	summary := strings.Join(lines, "\n")
+	if trimmedUser == "" {
+		return summary
+	}
+
+	return trimmedUser + "\n\n" + summary
+}
+
+// shouldInjectCurrentUserAfterCompression checks whether the compressed history
+// already contains the current round's persisted user message.
+// 如果已经存在，就不要在重试构建上下文时再次注入，避免重复内容和额外 token。
+func shouldInjectCurrentUserAfterCompression(history []providers.Message, opts processOptions) bool {
+	if len(history) == 0 {
+		return true
+	}
+
+	expectedContent := buildHistorySafeUserMessage(
+		opts.UserMessage,
+		opts.Attachments,
+		opts.AttachmentErrors,
+		opts.FileRefs,
+	)
+	expectedRefs := toFileRefMeta(opts.FileRefs)
+
+	for i := len(history) - 1; i >= 0; i-- {
+		msg := history[i]
+		if msg.Role != "user" {
+			continue
+		}
+
+		// 只看压缩后“最近的一条 user 消息”是否就是当前轮触发消息。
+		// 如果不是，说明当前消息在压缩中丢失，需要重新注入。
+		if msg.Content != expectedContent {
+			return true
+		}
+		return !fileRefMetaSliceEqual(msg.FileRefs, expectedRefs)
+	}
+
+	return true
+}
+
+func fileRefMetaSliceEqual(a, b []providers.FileRefMeta) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// hasNonPersistentLegacyPayload reports whether this round carries payload that
+// is not fully recoverable from persisted session history after compression.
+// 图片 base64 与附件解析正文不会被持久化，因此重试时需要重新注入。
+func hasNonPersistentLegacyPayload(opts processOptions) bool {
+	if len(opts.Images) > 0 {
+		return true
+	}
+
+	for _, attachment := range opts.Attachments {
+		if strings.TrimSpace(attachment.TextContent) != "" {
+			return true
+		}
+	}
+
+	return false
 }
 
 // runLLMIteration executes the LLM call loop with tool handling.
@@ -747,9 +886,35 @@ func (al *AgentLoop) runLLMIteration(
 				al.forceCompression(agent, opts.SessionKey)
 				newHistory := agent.Sessions.GetHistory(opts.SessionKey)
 				newSummary := agent.Sessions.GetSummary(opts.SessionKey)
+
+				needCurrentTurn := shouldInjectCurrentUserAfterCompression(newHistory, opts)
+				needLegacyPayload := hasNonPersistentLegacyPayload(opts)
+
+				// 压缩后按需重注入：
+				// 1) 当前轮消息缺失：完整重注入（文本+附件+file refs）
+				// 2) 当前轮消息已存在但存在不可恢复的 legacy 附件载荷：
+				//    仅补充附件载荷，避免重复注入用户文本。
+				retryUserMessage := ""
+				var retryImages []bus.EncodedImage
+				var retryAttachments []bus.Attachment
+				var retryAttachmentErrors []bus.AttachmentError
+				var retryFileRefs []bus.FileRef
+
+				if needCurrentTurn {
+					retryUserMessage = opts.UserMessage
+					retryImages = opts.Images
+					retryAttachments = opts.Attachments
+					retryAttachmentErrors = opts.AttachmentErrors
+					retryFileRefs = opts.FileRefs
+				} else if needLegacyPayload {
+					retryImages = opts.Images
+					retryAttachments = opts.Attachments
+					retryAttachmentErrors = opts.AttachmentErrors
+				}
+
 				messages = agent.ContextBuilder.BuildMessages(
-					newHistory, newSummary, "",
-					nil, opts.Channel, opts.ChatID,
+					ctx, newHistory, newSummary, retryUserMessage,
+					retryImages, retryAttachments, retryAttachmentErrors, retryFileRefs, opts.Channel, opts.ChatID,
 				)
 				continue
 			}
