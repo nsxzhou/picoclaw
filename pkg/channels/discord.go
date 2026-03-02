@@ -227,45 +227,44 @@ func (c *DiscordChannel) handleMessage(s *discordgo.Session, m *discordgo.Messag
 
 	for _, attachment := range m.Attachments {
 		isAudio := utils.IsAudioFile(attachment.Filename, attachment.ContentType)
+		localPath := c.downloadAttachment(attachment.URL, attachment.Filename)
+		if localPath == "" {
+			logger.WarnCF("discord", "Failed to download attachment", map[string]any{
+				"url":      attachment.URL,
+				"filename": attachment.Filename,
+			})
+			content = appendContent(content, fmt.Sprintf("[attachment: %s (download failed)]", attachment.Filename))
+			continue
+		}
+
+		localFiles = append(localFiles, localPath)
+		mediaPaths = append(mediaPaths, localPath)
 
 		if isAudio {
-			localPath := c.downloadAttachment(attachment.URL, attachment.Filename)
-			if localPath != "" {
-				localFiles = append(localFiles, localPath)
+			var transcribedText string
+			if c.transcriber != nil && c.transcriber.IsAvailable() {
+				ctx, cancel := context.WithTimeout(c.getContext(), transcriptionTimeout)
+				result, err := c.transcriber.Transcribe(ctx, localPath)
+				cancel() // Release context resources immediately to avoid leaks in for loop
 
-				var transcribedText string
-				if c.transcriber != nil && c.transcriber.IsAvailable() {
-					ctx, cancel := context.WithTimeout(c.getContext(), transcriptionTimeout)
-					result, err := c.transcriber.Transcribe(ctx, localPath)
-					cancel() // Release context resources immediately to avoid leaks in for loop
-
-					if err != nil {
-						logger.ErrorCF("discord", "Voice transcription failed", map[string]any{
-							"error": err.Error(),
-						})
-						transcribedText = fmt.Sprintf("[audio: %s (transcription failed)]", attachment.Filename)
-					} else {
-						transcribedText = fmt.Sprintf("[audio transcription: %s]", result.Text)
-						logger.DebugCF("discord", "Audio transcribed successfully", map[string]any{
-							"text": result.Text,
-						})
-					}
+				if err != nil {
+					logger.ErrorCF("discord", "Voice transcription failed", map[string]any{
+						"error": err.Error(),
+					})
+					transcribedText = fmt.Sprintf("[audio: %s (transcription failed)]", attachment.Filename)
 				} else {
-					transcribedText = fmt.Sprintf("[audio: %s]", attachment.Filename)
+					transcribedText = fmt.Sprintf("[audio transcription: %s]", result.Text)
+					logger.DebugCF("discord", "Audio transcribed successfully", map[string]any{
+						"text": result.Text,
+					})
 				}
-
-				content = appendContent(content, transcribedText)
 			} else {
-				logger.WarnCF("discord", "Failed to download audio attachment", map[string]any{
-					"url":      attachment.URL,
-					"filename": attachment.Filename,
-				})
-				mediaPaths = append(mediaPaths, attachment.URL)
-				content = appendContent(content, fmt.Sprintf("[attachment: %s]", attachment.URL))
+				transcribedText = fmt.Sprintf("[audio: %s]", attachment.Filename)
 			}
+
+			content = appendContent(content, transcribedText)
 		} else {
-			mediaPaths = append(mediaPaths, attachment.URL)
-			content = appendContent(content, fmt.Sprintf("[attachment: %s]", attachment.URL))
+			content = appendContent(content, fmt.Sprintf("[attachment: %s]", attachment.Filename))
 		}
 	}
 
