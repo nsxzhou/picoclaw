@@ -5,39 +5,57 @@
 
 package config
 
+import (
+	"os"
+	"path/filepath"
+)
+
 // DefaultConfig returns the default configuration for PicoClaw.
 func DefaultConfig() *Config {
+	// Determine the base path for the workspace.
+	// Priority: $PICOCLAW_HOME > ~/.picoclaw
+	var homePath string
+	if picoclawHome := os.Getenv("PICOCLAW_HOME"); picoclawHome != "" {
+		homePath = picoclawHome
+	} else {
+		userHome, _ := os.UserHomeDir()
+		homePath = filepath.Join(userHome, ".picoclaw")
+	}
+	workspacePath := filepath.Join(homePath, "workspace")
+
 	return &Config{
 		Agents: AgentsConfig{
 			Defaults: AgentDefaults{
-				Workspace:           "~/.picoclaw/workspace",
+				Workspace:           workspacePath,
 				RestrictToWorkspace: true,
 				Provider:            "",
-				Model:               "glm-4.7",
-				MaxTokens:           8192,
+				Model:               "",
+				MaxTokens:           32768,
 				Temperature:         nil, // nil means use provider default
-				MaxToolIterations:   20,
-				ModelRouting: &ModelRoutingConfig{
-					Enabled:      false,
-					SimpleModel:  "",
-					ComplexModel: "",
-				},
+				MaxToolIterations:   50,
 			},
 		},
 		Bindings: []AgentBinding{},
 		Session: SessionConfig{
-			DMScope: "main",
+			DMScope: "per-channel-peer",
 		},
 		Channels: ChannelsConfig{
 			WhatsApp: WhatsAppConfig{
-				Enabled:   false,
-				BridgeURL: "ws://localhost:3001",
-				AllowFrom: FlexibleStringSlice{},
+				Enabled:          false,
+				BridgeURL:        "ws://localhost:3001",
+				UseNative:        false,
+				SessionStorePath: "",
+				AllowFrom:        FlexibleStringSlice{},
 			},
 			Telegram: TelegramConfig{
 				Enabled:   false,
 				Token:     "",
 				AllowFrom: FlexibleStringSlice{},
+				Typing:    TypingConfig{Enabled: true},
+				Placeholder: PlaceholderConfig{
+					Enabled: true,
+					Text:    "Thinking... 💭",
+				},
 			},
 			Feishu: FeishuConfig{
 				Enabled:           false,
@@ -85,6 +103,7 @@ func DefaultConfig() *Config {
 				WebhookPort:        18791,
 				WebhookPath:        "/webhook/line",
 				AllowFrom:          FlexibleStringSlice{},
+				GroupTrigger:       GroupTriggerConfig{MentionOnly: true},
 			},
 			OneBot: OneBotConfig{
 				Enabled:            false,
@@ -117,6 +136,15 @@ func DefaultConfig() *Config {
 				WebhookPath:    "/webhook/wecom-app",
 				AllowFrom:      FlexibleStringSlice{},
 				ReplyTimeout:   5,
+			},
+			Pico: PicoConfig{
+				Enabled:        false,
+				Token:          "",
+				PingInterval:   30,
+				ReadTimeout:    60,
+				WriteTimeout:   10,
+				MaxConnections: 100,
+				AllowFrom:      FlexibleStringSlice{},
 			},
 		},
 		Providers: ProvidersConfig{
@@ -281,8 +309,14 @@ func DefaultConfig() *Config {
 			Port: 18790,
 		},
 		Tools: ToolsConfig{
+			MediaCleanup: MediaCleanupConfig{
+				Enabled:  true,
+				MaxAge:   30,
+				Interval: 5,
+			},
 			Web: WebToolsConfig{
-				Proxy: "",
+				Proxy:           "",
+				FetchLimitBytes: 10 * 1024 * 1024, // 10MB by default
 				Brave: BraveConfig{
 					Enabled:    false,
 					APIKey:     "",

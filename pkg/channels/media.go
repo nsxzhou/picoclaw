@@ -1,6 +1,7 @@
 package channels
 
 import (
+	"context"
 	"encoding/base64"
 	"net/http"
 	"os"
@@ -9,6 +10,14 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
+
+// MediaSender is an optional interface for channels that can send
+// media attachments (images, files, audio, video).
+// Manager discovers channels implementing this interface via type
+// assertion and routes OutboundMediaMessage to them.
+type MediaSender interface {
+	SendMedia(ctx context.Context, msg bus.OutboundMediaMessage) error
+}
 
 // maxImageSize is the upper bound (20 MB) for a single image file.
 // Larger files are silently skipped to protect memory and API limits.
@@ -25,8 +34,6 @@ var supportedImageTypes = map[string]bool{
 // encodeImageMedia reads image files from disk, detects their MIME type,
 // and returns base64-encoded representations. Non-image files, oversized
 // files, and unreadable paths are silently skipped.
-//
-// This MUST be called while the temp files still exist (before defer cleanup).
 func encodeImageMedia(mediaPaths []string) []bus.EncodedImage {
 	if len(mediaPaths) == 0 {
 		return nil

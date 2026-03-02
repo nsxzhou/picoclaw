@@ -44,4 +44,6 @@ tasks/
 
 # Added by goreleaser init:
 dist/
-.ace-tool/
+
+# Windows Application Icon/Resource
+*.syso
