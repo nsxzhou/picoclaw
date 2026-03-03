@@ -290,10 +290,12 @@ func parseResponse(body []byte) (*LLMResponse, error) {
 // internal field that would be unknown to third-party endpoints.
 // Content is `any` to support both plain string and multimodal content parts array.
 type openaiMessage struct {
-	Role       string     `json:"role"`
-	Content    any        `json:"content"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Role string `json:"role"`
+	// 同时兼容纯文本与多模态内容数组（image/file parts）。
+	Content          any        `json:"content"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
 }
 
 // openaiContentPart represents a single part in a multimodal content array.
@@ -325,9 +327,10 @@ func stripSystemParts(messages []Message) []openaiMessage {
 	out := make([]openaiMessage, len(messages))
 	for i, m := range messages {
 		out[i] = openaiMessage{
-			Role:       m.Role,
-			ToolCalls:  m.ToolCalls,
-			ToolCallID: m.ToolCallID,
+			Role:             m.Role,
+			ReasoningContent: m.ReasoningContent,
+			ToolCalls:        m.ToolCalls,
+			ToolCallID:       m.ToolCallID,
 		}
 		if len(m.Images) > 0 || len(m.Files) > 0 {
 			// Multimodal: build content parts array
@@ -375,7 +378,7 @@ func normalizeModel(model, apiBase string) string {
 
 	prefix := strings.ToLower(before)
 	switch prefix {
-	case "moonshot", "nvidia", "groq", "ollama", "deepseek", "google", "openrouter", "zhipu", "mistral":
+	case "litellm", "moonshot", "nvidia", "groq", "ollama", "deepseek", "google", "openrouter", "zhipu", "mistral":
 		return after
 	default:
 		return model
