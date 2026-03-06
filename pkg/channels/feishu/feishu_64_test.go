@@ -8,113 +8,248 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
-func strPtr(s string) *string {
-	return &s
-}
-
-func TestExtractFeishuTextContent(t *testing.T) {
+func TestExtractContent(t *testing.T) {
 	tests := []struct {
-		name    string
-		message *larkim.EventMessage
-		want    string
+		name        string
+		messageType string
+		rawContent  string
+		want        string
 	}{
 		{
-			name:    "nil message",
-			message: nil,
-			want:    "",
+			name:        "text message",
+			messageType: "text",
+			rawContent:  `{"text": "hello world"}`,
+			want:        "hello world",
 		},
 		{
-			name:    "empty content",
-			message: &larkim.EventMessage{Content: strPtr("")},
-			want:    "",
+			name:        "text message invalid JSON",
+			messageType: "text",
+			rawContent:  `not json`,
+			want:        "not json",
 		},
 		{
-			name:    "valid text payload",
-			message: &larkim.EventMessage{Content: strPtr(`{"text":"你好"}`)},
-			want:    "你好",
+			name:        "post message returns raw JSON",
+			messageType: "post",
+			rawContent:  `{"title": "test post"}`,
+			want:        `{"title": "test post"}`,
 		},
 		{
-			name:    "invalid json falls back to raw",
-			message: &larkim.EventMessage{Content: strPtr("plain text")},
-			want:    "plain text",
+			name:        "image message returns empty",
+			messageType: "image",
+			rawContent:  `{"image_key": "img_xxx"}`,
+			want:        "",
+		},
+		{
+			name:        "file message with filename",
+			messageType: "file",
+			rawContent:  `{"file_key": "file_xxx", "file_name": "report.pdf"}`,
+			want:        "report.pdf",
+		},
+		{
+			name:        "file message without filename",
+			messageType: "file",
+			rawContent:  `{"file_key": "file_xxx"}`,
+			want:        "",
+		},
+		{
+			name:        "audio message with filename",
+			messageType: "audio",
+			rawContent:  `{"file_key": "file_xxx", "file_name": "recording.ogg"}`,
+			want:        "recording.ogg",
+		},
+		{
+			name:        "media message with filename",
+			messageType: "media",
+			rawContent:  `{"file_key": "file_xxx", "file_name": "video.mp4"}`,
+			want:        "video.mp4",
+		},
+		{
+			name:        "unknown message type returns raw",
+			messageType: "sticker",
+			rawContent:  `{"sticker_id": "sticker_xxx"}`,
+			want:        `{"sticker_id": "sticker_xxx"}`,
+		},
+		{
+			name:        "empty raw content",
+			messageType: "text",
+			rawContent:  "",
+			want:        "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := extractFeishuTextContent(tt.message)
+			got := extractContent(tt.messageType, tt.rawContent)
 			if got != tt.want {
-				t.Fatalf("extractFeishuTextContent() = %q, want %q", got, tt.want)
+				t.Errorf("extractContent(%q, %q) = %q, want %q", tt.messageType, tt.rawContent, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestExtractFeishuImageKey(t *testing.T) {
+func TestAppendMediaTags(t *testing.T) {
 	tests := []struct {
-		name    string
-		message *larkim.EventMessage
-		want    string
+		name        string
+		content     string
+		messageType string
+		mediaRefs   []string
+		want        string
 	}{
 		{
-			name:    "nil message",
-			message: nil,
-			want:    "",
+			name:        "no refs returns content unchanged",
+			content:     "hello",
+			messageType: "image",
+			mediaRefs:   nil,
+			want:        "hello",
 		},
 		{
-			name:    "valid payload",
-			message: &larkim.EventMessage{Content: strPtr(`{"image_key":"img_123"}`)},
-			want:    "img_123",
+			name:        "empty refs returns content unchanged",
+			content:     "hello",
+			messageType: "image",
+			mediaRefs:   []string{},
+			want:        "hello",
 		},
 		{
-			name:    "invalid payload",
-			message: &larkim.EventMessage{Content: strPtr(`{"text":"no image key"}`)},
-			want:    "",
+			name:        "image with content",
+			content:     "check this",
+			messageType: "image",
+			mediaRefs:   []string{"ref1"},
+			want:        "check this [image: photo]",
+		},
+		{
+			name:        "image empty content",
+			content:     "",
+			messageType: "image",
+			mediaRefs:   []string{"ref1"},
+			want:        "[image: photo]",
+		},
+		{
+			name:        "audio",
+			content:     "listen",
+			messageType: "audio",
+			mediaRefs:   []string{"ref1"},
+			want:        "listen [audio]",
+		},
+		{
+			name:        "media/video",
+			content:     "watch",
+			messageType: "media",
+			mediaRefs:   []string{"ref1"},
+			want:        "watch [video]",
+		},
+		{
+			name:        "file",
+			content:     "report.pdf",
+			messageType: "file",
+			mediaRefs:   []string{"ref1"},
+			want:        "report.pdf [file]",
+		},
+		{
+			name:        "unknown type",
+			content:     "something",
+			messageType: "sticker",
+			mediaRefs:   []string{"ref1"},
+			want:        "something [attachment]",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := extractFeishuImageKey(tt.message)
+			got := appendMediaTags(tt.content, tt.messageType, tt.mediaRefs)
 			if got != tt.want {
-				t.Fatalf("extractFeishuImageKey() = %q, want %q", got, tt.want)
+				t.Errorf(
+					"appendMediaTags(%q, %q, %v) = %q, want %q",
+					tt.content,
+					tt.messageType,
+					tt.mediaRefs,
+					got,
+					tt.want,
+				)
 			}
 		})
 	}
 }
 
-func TestExtractFeishuFileInfo(t *testing.T) {
+func TestExtractFeishuSenderID(t *testing.T) {
+	strPtr := func(s string) *string { return &s }
+
 	tests := []struct {
-		name     string
-		message  *larkim.EventMessage
-		wantKey  string
-		wantName string
+		name   string
+		sender *larkim.EventSender
+		want   string
 	}{
 		{
-			name:     "nil message",
-			message:  nil,
-			wantKey:  "",
-			wantName: "",
+			name:   "nil sender",
+			sender: nil,
+			want:   "",
 		},
 		{
-			name:     "valid payload",
-			message:  &larkim.EventMessage{Content: strPtr(`{"file_key":"file_123","file_name":"a.txt"}`)},
-			wantKey:  "file_123",
-			wantName: "a.txt",
+			name:   "nil sender ID",
+			sender: &larkim.EventSender{SenderId: nil},
+			want:   "",
 		},
 		{
-			name:     "invalid payload",
-			message:  &larkim.EventMessage{Content: strPtr(`{"text":"no file info"}`)},
-			wantKey:  "",
-			wantName: "",
+			name: "userId preferred",
+			sender: &larkim.EventSender{
+				SenderId: &larkim.UserId{
+					UserId:  strPtr("u_abc123"),
+					OpenId:  strPtr("ou_def456"),
+					UnionId: strPtr("on_ghi789"),
+				},
+			},
+			want: "u_abc123",
+		},
+		{
+			name: "openId fallback",
+			sender: &larkim.EventSender{
+				SenderId: &larkim.UserId{
+					UserId:  strPtr(""),
+					OpenId:  strPtr("ou_def456"),
+					UnionId: strPtr("on_ghi789"),
+				},
+			},
+			want: "ou_def456",
+		},
+		{
+			name: "unionId fallback",
+			sender: &larkim.EventSender{
+				SenderId: &larkim.UserId{
+					UserId:  strPtr(""),
+					OpenId:  strPtr(""),
+					UnionId: strPtr("on_ghi789"),
+				},
+			},
+			want: "on_ghi789",
+		},
+		{
+			name: "all empty strings",
+			sender: &larkim.EventSender{
+				SenderId: &larkim.UserId{
+					UserId:  strPtr(""),
+					OpenId:  strPtr(""),
+					UnionId: strPtr(""),
+				},
+			},
+			want: "",
+		},
+		{
+			name: "nil userId pointer falls through",
+			sender: &larkim.EventSender{
+				SenderId: &larkim.UserId{
+					UserId:  nil,
+					OpenId:  strPtr("ou_def456"),
+					UnionId: nil,
+				},
+			},
+			want: "ou_def456",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotKey, gotName := extractFeishuFileInfo(tt.message)
-			if gotKey != tt.wantKey || gotName != tt.wantName {
-				t.Fatalf("extractFeishuFileInfo() = (%q, %q), want (%q, %q)", gotKey, gotName, tt.wantKey, tt.wantName)
+			got := extractFeishuSenderID(tt.sender)
+			if got != tt.want {
+				t.Errorf("extractFeishuSenderID() = %q, want %q", got, tt.want)
 			}
 		})
 	}

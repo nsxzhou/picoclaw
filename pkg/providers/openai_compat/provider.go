@@ -116,7 +116,7 @@ func (p *Provider) Chat(
 
 	requestBody := map[string]any{
 		"model":    model,
-		"messages": stripSystemParts(messages),
+		"messages": serializeMessages(messages),
 	}
 
 	if len(tools) > 0 {
@@ -288,80 +288,65 @@ func parseResponse(body []byte) (*LLMResponse, error) {
 // openaiMessage is the wire-format message for OpenAI-compatible APIs.
 // It mirrors protocoltypes.Message but omits SystemParts, which is an
 // internal field that would be unknown to third-party endpoints.
-// Content is `any` to support both plain string and multimodal content parts array.
 type openaiMessage struct {
-	Role string `json:"role"`
-	// 同时兼容纯文本与多模态内容数组（image/file parts）。
-	Content          any        `json:"content"`
+	Role             string     `json:"role"`
+	Content          string     `json:"content"`
 	ReasoningContent string     `json:"reasoning_content,omitempty"`
 	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string     `json:"tool_call_id,omitempty"`
 }
 
-// openaiContentPart represents a single part in a multimodal content array.
-type openaiContentPart struct {
-	Type     string            `json:"type"`
-	Text     string            `json:"text,omitempty"`
-	ImageURL *openaiImageURL   `json:"image_url,omitempty"`
-	File     *openaiFileInline `json:"file,omitempty"`
-}
-
-// openaiImageURL holds a base64 data URI for an inline image.
-type openaiImageURL struct {
-	URL string `json:"url"`
-}
-
-// openaiFileInline holds an inline base64 file for the OpenAI file content part.
-// See: https://platform.openai.com/docs/guides/pdf-files
-type openaiFileInline struct {
-	Data     string `json:"data"` // "data:<mime>;base64,..."
-	Filename string `json:"filename"`
-}
-
-// stripSystemParts converts []Message to []openaiMessage, dropping the
-// SystemParts field so it doesn't leak into the JSON payload sent to
-// OpenAI-compatible APIs (some strict endpoints reject unknown fields).
-// When a message carries Images or Files, Content is serialized as a content
-// parts array (vision/file API format) instead of a plain string.
-func stripSystemParts(messages []Message) []openaiMessage {
-	out := make([]openaiMessage, len(messages))
-	for i, m := range messages {
-		out[i] = openaiMessage{
-			Role:             m.Role,
-			ReasoningContent: m.ReasoningContent,
-			ToolCalls:        m.ToolCalls,
-			ToolCallID:       m.ToolCallID,
+// serializeMessages converts internal Message structs to the OpenAI wire format.
+// - Strips SystemParts (unknown to third-party endpoints)
+// - Converts messages with Media to multipart content format (text + image_url parts)
+// - Preserves ToolCallID, ToolCalls, and ReasoningContent for all messages
+func serializeMessages(messages []Message) []any {
+	out := make([]any, 0, len(messages))
+	for _, m := range messages {
+		if len(m.Media) == 0 {
+			out = append(out, openaiMessage{
+				Role:             m.Role,
+				Content:          m.Content,
+				ReasoningContent: m.ReasoningContent,
+				ToolCalls:        m.ToolCalls,
+				ToolCallID:       m.ToolCallID,
+			})
+			continue
 		}
-		if len(m.Images) > 0 || len(m.Files) > 0 {
-			// Multimodal: build content parts array
-			parts := make([]openaiContentPart, 0, len(m.Images)+len(m.Files)+1)
-			for _, img := range m.Images {
-				parts = append(parts, openaiContentPart{
-					Type: "image_url",
-					ImageURL: &openaiImageURL{
-						URL: "data:" + img.MediaType + ";base64," + img.Data,
+
+		// Multipart content format for messages with media
+		parts := make([]map[string]any, 0, 1+len(m.Media))
+		if m.Content != "" {
+			parts = append(parts, map[string]any{
+				"type": "text",
+				"text": m.Content,
+			})
+		}
+		for _, mediaURL := range m.Media {
+			if strings.HasPrefix(mediaURL, "data:image/") {
+				parts = append(parts, map[string]any{
+					"type": "image_url",
+					"image_url": map[string]any{
+						"url": mediaURL,
 					},
 				})
 			}
-			for _, f := range m.Files {
-				parts = append(parts, openaiContentPart{
-					Type: "file",
-					File: &openaiFileInline{
-						Data:     "data:" + f.MediaType + ";base64," + f.Data,
-						Filename: f.Name,
-					},
-				})
-			}
-			if m.Content != "" {
-				parts = append(parts, openaiContentPart{
-					Type: "text",
-					Text: m.Content,
-				})
-			}
-			out[i].Content = parts
-		} else {
-			out[i].Content = m.Content
 		}
+
+		msg := map[string]any{
+			"role":    m.Role,
+			"content": parts,
+		}
+		if m.ToolCallID != "" {
+			msg["tool_call_id"] = m.ToolCallID
+		}
+		if len(m.ToolCalls) > 0 {
+			msg["tool_calls"] = m.ToolCalls
+		}
+		if m.ReasoningContent != "" {
+			msg["reasoning_content"] = m.ReasoningContent
+		}
+		out = append(out, msg)
 	}
 	return out
 }

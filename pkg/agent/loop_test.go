@@ -13,6 +13,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
@@ -163,35 +164,21 @@ func TestToolRegistry_ToolRegistration(t *testing.T) {
 	}
 }
 
-// TestToolContext_Updates verifies tool context is updated with channel/chatID
+// TestToolContext_Updates verifies tool context helpers work correctly
 func TestToolContext_Updates(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "agent-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	ctx := tools.WithToolContext(context.Background(), "telegram", "chat-42")
 
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				Workspace:         tmpDir,
-				Model:             "test-model",
-				MaxTokens:         4096,
-				MaxToolIterations: 10,
-			},
-		},
+	if got := tools.ToolChannel(ctx); got != "telegram" {
+		t.Errorf("expected channel 'telegram', got %q", got)
+	}
+	if got := tools.ToolChatID(ctx); got != "chat-42" {
+		t.Errorf("expected chatID 'chat-42', got %q", got)
 	}
 
-	msgBus := bus.NewMessageBus()
-	provider := &simpleMockProvider{response: "OK"}
-	_ = NewAgentLoop(cfg, msgBus, provider)
-
-	// Verify that ContextualTool interface is defined and can be implemented
-	// This test validates the interface contract exists
-	ctxTool := &mockContextualTool{}
-
-	// Verify the tool implements the interface correctly
-	var _ tools.ContextualTool = ctxTool
+	// Empty context returns empty strings
+	if got := tools.ToolChannel(context.Background()); got != "" {
+		t.Errorf("expected empty channel from bare context, got %q", got)
+	}
 }
 
 // TestToolRegistry_GetDefinitions verifies tool definitions can be retrieved
@@ -240,16 +227,11 @@ func TestAgentLoop_GetStartupInfo(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				Workspace:         tmpDir,
-				Model:             "test-model",
-				MaxTokens:         4096,
-				MaxToolIterations: 10,
-			},
-		},
-	}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = tmpDir
+	cfg.Agents.Defaults.Model = "test-model"
+	cfg.Agents.Defaults.MaxTokens = 4096
+	cfg.Agents.Defaults.MaxToolIterations = 10
 
 	msgBus := bus.NewMessageBus()
 	provider := &mockProvider{}
@@ -356,36 +338,6 @@ func (m *mockCustomTool) Parameters() map[string]any {
 
 func (m *mockCustomTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
 	return tools.SilentResult("Custom tool executed")
-}
-
-// mockContextualTool tracks context updates
-type mockContextualTool struct {
-	lastChannel string
-	lastChatID  string
-}
-
-func (m *mockContextualTool) Name() string {
-	return "mock_contextual"
-}
-
-func (m *mockContextualTool) Description() string {
-	return "Mock contextual tool"
-}
-
-func (m *mockContextualTool) Parameters() map[string]any {
-	return map[string]any{
-		"type":       "object",
-		"properties": map[string]any{},
-	}
-}
-
-func (m *mockContextualTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
-	return tools.SilentResult("Contextual tool executed")
-}
-
-func (m *mockContextualTool) SetContext(channel, chatID string) {
-	m.lastChannel = channel
-	m.lastChatID = chatID
 }
 
 // testHelper executes a message and returns the response
@@ -810,200 +762,141 @@ func TestHandleReasoning(t *testing.T) {
 	})
 }
 
-func TestBuildHistorySafeUserMessage_WithAttachments(t *testing.T) {
-	rawUser := "please analyze files"
-	attachments := []bus.Attachment{
-		{
-			Name:        "report.txt",
-			MediaType:   "text/plain",
-			SizeBytes:   12,
-			TextContent: "sensitive file content",
-		},
-		{
-			Name:      "photo.jpg",
-			MediaType: "image/jpeg",
-			SizeBytes: 2048,
-		},
-	}
-	attachmentErrors := []bus.AttachmentError{
-		{
-			Name:        "large.pdf",
-			Code:        "file_too_large",
-			UserMessage: "Attachment \"large.pdf\" is too large to parse.",
-		},
-	}
+func TestResolveMediaRefs_ResolvesToBase64(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
 
-	got := buildHistorySafeUserMessage(rawUser, attachments, attachmentErrors, nil)
-	if !strings.Contains(got, rawUser) {
-		t.Fatalf("result does not contain original user message: %q", got)
+	// Create a minimal valid PNG (8-byte header is enough for filetype detection)
+	pngPath := filepath.Join(dir, "test.png")
+	// PNG magic: 0x89 P N G \r \n 0x1A \n + minimal IHDR
+	pngHeader := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+		0x00, 0x00, 0x00, 0x0D, // IHDR length
+		0x49, 0x48, 0x44, 0x52, // "IHDR"
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, // 1x1 RGB
+		0x00, 0x00, 0x00, // no interlace
+		0x90, 0x77, 0x53, 0xDE, // CRC
 	}
-	if !strings.Contains(got, "[attachment summary]") {
-		t.Fatalf("result does not contain attachment summary marker: %q", got)
+	if err := os.WriteFile(pngPath, pngHeader, 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(got, "sensitive file content") {
-		t.Fatalf("result should not include attachment raw content: %q", got)
-	}
-	if !strings.Contains(got, "report.txt") || !strings.Contains(got, "photo.jpg") {
-		t.Fatalf("result does not contain attachment metadata: %q", got)
-	}
-	if !strings.Contains(got, "[error] large.pdf") {
-		t.Fatalf("result does not contain attachment error summary: %q", got)
-	}
-}
-
-func TestRunAgentLoop_PersistsFileRefsInSession(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "agent-test-*")
+	ref, err := store.Store(pngPath, media.MediaMeta{}, "test")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				Workspace:         tmpDir,
-				Model:             "test-model",
-				MaxTokens:         4096,
-				MaxToolIterations: 10,
-			},
-		},
+		t.Fatal(err)
 	}
 
-	msgBus := bus.NewMessageBus()
-	provider := &simpleMockProvider{response: "done"}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	messages := []providers.Message{
+		{Role: "user", Content: "describe this", Media: []string{ref}},
+	}
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
 
-	agent := al.registry.GetDefaultAgent()
-	if agent == nil {
-		t.Fatal("No default agent found")
+	if len(result[0].Media) != 1 {
+		t.Fatalf("expected 1 resolved media, got %d", len(result[0].Media))
 	}
-
-	fileRefs := []bus.FileRef{
-		{
-			Name:            "report.pdf",
-			MediaType:       "application/pdf",
-			Kind:            bus.AttachmentKindDocument,
-			Source:          bus.FileRefSourceFeishu,
-			FeishuMessageID: "om_123",
-			FeishuFileKey:   "file_123",
-			FeishuResType:   "file",
-		},
-	}
-
-	_, err = al.runAgentLoop(context.Background(), agent, processOptions{
-		SessionKey:      "test-session-file-refs",
-		Channel:         "feishu",
-		ChatID:          "chat1",
-		UserMessage:     "please analyze attached file",
-		FileRefs:        fileRefs,
-		DefaultResponse: "fallback",
-		EnableSummary:   false,
-		SendResponse:    false,
-	})
-	if err != nil {
-		t.Fatalf("runAgentLoop() failed: %v", err)
-	}
-
-	history := agent.Sessions.GetHistory("test-session-file-refs")
-	if len(history) < 2 {
-		t.Fatalf("history len = %d, want at least 2", len(history))
-	}
-
-	userMsg := history[0]
-	if userMsg.Role != "user" {
-		t.Fatalf("history[0].Role = %q, want user", userMsg.Role)
-	}
-	if len(userMsg.FileRefs) != 1 {
-		t.Fatalf("len(history[0].FileRefs) = %d, want 1", len(userMsg.FileRefs))
-	}
-	if userMsg.FileRefs[0].FeishuFileKey != "file_123" {
-		t.Fatalf("persisted file key = %q, want %q", userMsg.FileRefs[0].FeishuFileKey, "file_123")
+	if !strings.HasPrefix(result[0].Media[0], "data:image/png;base64,") {
+		t.Fatalf("expected data:image/png;base64, prefix, got %q", result[0].Media[0][:40])
 	}
 }
 
-func TestShouldInjectCurrentUserAfterCompression_AlreadyInHistory(t *testing.T) {
-	opts := processOptions{
-		UserMessage: "please analyze attached file",
-		Attachments: []bus.Attachment{
-			{
-				Name:      "notes.txt",
-				MediaType: "text/plain",
-				SizeBytes: 12,
-			},
-		},
-		AttachmentErrors: []bus.AttachmentError{
-			{
-				Name:        "broken.pdf",
-				Code:        "parse_failed",
-				UserMessage: "Attachment parse failed",
-			},
-		},
-		FileRefs: []bus.FileRef{
-			{
-				Name:            "report.pdf",
-				MediaType:       "application/pdf",
-				Kind:            bus.AttachmentKindDocument,
-				Source:          bus.FileRefSourceFeishu,
-				FeishuMessageID: "om_1",
-				FeishuFileKey:   "file_1",
-				FeishuResType:   "file",
-			},
-		},
+func TestResolveMediaRefs_SkipsOversizedFile(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+
+	bigPath := filepath.Join(dir, "big.png")
+	// Write PNG header + padding to exceed limit
+	data := make([]byte, 1024+1) // 1KB + 1 byte
+	copy(data, []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A})
+	if err := os.WriteFile(bigPath, data, 0o644); err != nil {
+		t.Fatal(err)
 	}
+	ref, _ := store.Store(bigPath, media.MediaMeta{}, "test")
 
-	expectedUserContent := buildHistorySafeUserMessage(
-		opts.UserMessage,
-		opts.Attachments,
-		opts.AttachmentErrors,
-		opts.FileRefs,
-	)
-
-	history := []providers.Message{
-		{Role: "system", Content: "system"},
-		{
-			Role:    "user",
-			Content: expectedUserContent,
-			FileRefs: []providers.FileRefMeta{
-				{
-					Name:            "report.pdf",
-					MediaType:       "application/pdf",
-					Kind:            string(bus.AttachmentKindDocument),
-					Source:          string(bus.FileRefSourceFeishu),
-					FeishuMessageID: "om_1",
-					FeishuFileKey:   "file_1",
-					FeishuResType:   "file",
-				},
-			},
-		},
+	messages := []providers.Message{
+		{Role: "user", Content: "hi", Media: []string{ref}},
 	}
+	// Use a tiny limit (1KB) so the file is oversized
+	result := resolveMediaRefs(messages, store, 1024)
 
-	if got := shouldInjectCurrentUserAfterCompression(history, opts); got {
-		t.Fatal("shouldInjectCurrentUserAfterCompression() = true, want false")
+	if len(result[0].Media) != 0 {
+		t.Fatalf("expected 0 media (oversized), got %d", len(result[0].Media))
 	}
 }
 
-func TestShouldInjectCurrentUserAfterCompression_MissingFromHistory(t *testing.T) {
-	opts := processOptions{
-		UserMessage: "please analyze attached file",
-		FileRefs: []bus.FileRef{
-			{
-				Name:            "report.pdf",
-				MediaType:       "application/pdf",
-				Kind:            bus.AttachmentKindDocument,
-				Source:          bus.FileRefSourceFeishu,
-				FeishuMessageID: "om_1",
-				FeishuFileKey:   "file_1",
-				FeishuResType:   "file",
-			},
-		},
-	}
+func TestResolveMediaRefs_SkipsUnknownType(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
 
-	history := []providers.Message{
-		{Role: "system", Content: "system"},
-		{Role: "user", Content: "other user message"},
+	txtPath := filepath.Join(dir, "readme.txt")
+	if err := os.WriteFile(txtPath, []byte("hello world"), 0o644); err != nil {
+		t.Fatal(err)
 	}
+	ref, _ := store.Store(txtPath, media.MediaMeta{}, "test")
 
-	if got := shouldInjectCurrentUserAfterCompression(history, opts); !got {
-		t.Fatal("shouldInjectCurrentUserAfterCompression() = false, want true")
+	messages := []providers.Message{
+		{Role: "user", Content: "hi", Media: []string{ref}},
+	}
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+
+	if len(result[0].Media) != 0 {
+		t.Fatalf("expected 0 media (unknown type), got %d", len(result[0].Media))
+	}
+}
+
+func TestResolveMediaRefs_PassesThroughNonMediaRefs(t *testing.T) {
+	messages := []providers.Message{
+		{Role: "user", Content: "hi", Media: []string{"https://example.com/img.png"}},
+	}
+	result := resolveMediaRefs(messages, nil, config.DefaultMaxMediaSize)
+
+	if len(result[0].Media) != 1 || result[0].Media[0] != "https://example.com/img.png" {
+		t.Fatalf("expected passthrough of non-media:// URL, got %v", result[0].Media)
+	}
+}
+
+func TestResolveMediaRefs_DoesNotMutateOriginal(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+	pngPath := filepath.Join(dir, "test.png")
+	pngHeader := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02,
+		0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,
+	}
+	os.WriteFile(pngPath, pngHeader, 0o644)
+	ref, _ := store.Store(pngPath, media.MediaMeta{}, "test")
+
+	original := []providers.Message{
+		{Role: "user", Content: "hi", Media: []string{ref}},
+	}
+	originalRef := original[0].Media[0]
+
+	resolveMediaRefs(original, store, config.DefaultMaxMediaSize)
+
+	if original[0].Media[0] != originalRef {
+		t.Fatal("resolveMediaRefs mutated original message slice")
+	}
+}
+
+func TestResolveMediaRefs_UsesMetaContentType(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+
+	// File with JPEG content but stored with explicit content type
+	jpegPath := filepath.Join(dir, "photo")
+	jpegHeader := []byte{0xFF, 0xD8, 0xFF, 0xE0} // JPEG magic bytes
+	os.WriteFile(jpegPath, jpegHeader, 0o644)
+	ref, _ := store.Store(jpegPath, media.MediaMeta{ContentType: "image/jpeg"}, "test")
+
+	messages := []providers.Message{
+		{Role: "user", Content: "hi", Media: []string{ref}},
+	}
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+
+	if len(result[0].Media) != 1 {
+		t.Fatalf("expected 1 media, got %d", len(result[0].Media))
+	}
+	if !strings.HasPrefix(result[0].Media[0], "data:image/jpeg;base64,") {
+		t.Fatalf("expected jpeg prefix, got %q", result[0].Media[0][:30])
 	}
 }
