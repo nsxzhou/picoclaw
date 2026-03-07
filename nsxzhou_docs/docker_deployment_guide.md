@@ -263,7 +263,7 @@ git pull origin main
 docker compose -f docker/docker-compose.full.yml build
 
 # 重启服务（零停机方式）
-docker compose -f docker/docker-compose.full.yml --profile gateway up -d --force-recreate
+docker compose -f docker/docker-compose.full.yml --profile gateway up -d --build --force-recreate
 ```
 
 ### 4.3 一键更新脚本
