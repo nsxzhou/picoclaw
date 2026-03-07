@@ -620,9 +620,13 @@ type SkillsToolsConfig struct {
 // ImageToolConfig 定义生图工具的独立配置
 type ImageToolConfig struct {
 	ToolConfig `         envPrefix:"PICOCLAW_TOOLS_GENERATE_IMAGE_"`
-	APIKey     string `                                             env:"PICOCLAW_TOOLS_GENERATE_IMAGE_API_KEY"  json:"api_key"`
-	APIBase    string `                                             env:"PICOCLAW_TOOLS_GENERATE_IMAGE_API_BASE" json:"api_base"`
-	Model      string `                                             env:"PICOCLAW_TOOLS_GENERATE_IMAGE_MODEL"    json:"model"`
+	APIKey     string `                                             env:"PICOCLAW_TOOLS_GENERATE_IMAGE_API_KEY"   json:"api_key"`
+	APIBase    string `                                             env:"PICOCLAW_TOOLS_GENERATE_IMAGE_API_BASE"  json:"api_base"`
+	Model      string `                                             env:"PICOCLAW_TOOLS_GENERATE_IMAGE_MODEL"     json:"model"`
+	// APIType 指定接口格式："images_generations"（默认）或 "chat_completions"
+	// images_generations: 标准 OpenAI /v1/images/generations 接口
+	// chat_completions:   通过 /v1/chat/completions 生图，图片以 markdown 链接返回
+	APIType string `                                             env:"PICOCLAW_TOOLS_GENERATE_IMAGE_API_TYPE"  json:"api_type,omitempty"`
 }
 
 type MediaCleanupConfig struct {

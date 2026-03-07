@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,7 +19,10 @@ import (
 	"github.com/sipeed/picoclaw/pkg/media"
 )
 
-// GenerateImageTool 通过 OpenAI 兼容的 /v1/images/generations 接口生成图片。
+// GenerateImageTool 通过 AI 生图 API 生成图片。
+// 支持两种 API 格式：
+//   - images_generations: 标准 OpenAI /v1/images/generations 接口
+//   - chat_completions:   通过 /v1/chat/completions 生图，图片以 markdown 链接返回
 type GenerateImageTool struct {
 	workspace  string
 	imgCfg     config.ImageToolConfig
@@ -79,7 +84,17 @@ func (t *GenerateImageTool) Execute(ctx context.Context, args map[string]any) *T
 		size = "1024x1024"
 	}
 
-	// 构建请求
+	// 根据 api_type 选择调用方式
+	apiType := strings.TrimSpace(t.imgCfg.APIType)
+	if apiType == "chat_completions" {
+		return t.executeViaChatCompletions(ctx, prompt)
+	}
+	// 默认使用 images_generations
+	return t.executeViaImagesGenerations(ctx, prompt, size)
+}
+
+// executeViaImagesGenerations 使用标准 OpenAI /v1/images/generations 接口生图。
+func (t *GenerateImageTool) executeViaImagesGenerations(ctx context.Context, prompt, size string) *ToolResult {
 	reqBody := imageGenRequest{
 		Model:          t.imgCfg.Model,
 		Prompt:         prompt,
@@ -93,7 +108,6 @@ func (t *GenerateImageTool) Execute(ctx context.Context, args map[string]any) *T
 		return ErrorResult(fmt.Sprintf("failed to marshal request: %v", err))
 	}
 
-	// 构造 API URL
 	apiURL := strings.TrimRight(t.imgCfg.APIBase, "/") + "/v1/images/generations"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(bodyBytes))
@@ -118,7 +132,6 @@ func (t *GenerateImageTool) Execute(ctx context.Context, args map[string]any) *T
 		return ErrorResult(fmt.Sprintf("API returned status %d: %s", resp.StatusCode, string(respBody)))
 	}
 
-	// 解析响应
 	var imgResp imageGenResponse
 	if err := json.Unmarshal(respBody, &imgResp); err != nil {
 		return ErrorResult(fmt.Sprintf("failed to parse response: %v", err))
@@ -130,43 +143,171 @@ func (t *GenerateImageTool) Execute(ctx context.Context, args map[string]any) *T
 
 	imgData := imgResp.Data[0]
 
-	// 保存图片到 workspace
+	// 确定图片 URL 或 base64 数据
+	if imgData.B64JSON != "" {
+		decoded, err := base64.StdEncoding.DecodeString(imgData.B64JSON)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("failed to decode base64 image: %v", err))
+		}
+		return t.saveAndReturn(ctx, decoded, prompt)
+	}
+
+	if imgData.URL != "" {
+		return t.downloadAndReturn(ctx, imgData.URL, prompt)
+	}
+
+	return ErrorResult("API response contains no image data (neither b64_json nor url)")
+}
+
+// executeViaChatCompletions 使用 /v1/chat/completions 接口生图。
+// 该格式通过 SSE 流返回，图片以 markdown 链接（![...](url)）嵌入在 content 中。
+func (t *GenerateImageTool) executeViaChatCompletions(ctx context.Context, prompt string) *ToolResult {
+	reqBody := chatCompletionsRequest{
+		Model: t.imgCfg.Model,
+		Messages: []chatMessage{
+			{Role: "user", Content: prompt},
+		},
+		Stream: true,
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return ErrorResult(fmt.Sprintf("failed to marshal request: %v", err))
+	}
+
+	apiURL := strings.TrimRight(t.imgCfg.APIBase, "/") + "/v1/chat/completions"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return ErrorResult(fmt.Sprintf("failed to create request: %v", err))
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+t.imgCfg.APIKey)
+
+	resp, err := t.httpClient.Do(req)
+	if err != nil {
+		return ErrorResult(fmt.Sprintf("API request failed: %v", err))
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return ErrorResult(fmt.Sprintf("API returned status %d: %s", resp.StatusCode, string(respBody)))
+	}
+
+	// 解析 SSE 流，提取完整 content
+	content := t.parseSSEContent(resp.Body)
+	if content == "" {
+		return ErrorResult("API returned no content in chat completions response")
+	}
+
+	// 从 content 中提取 markdown 图片 URL
+	imageURL := extractMarkdownImageURL(content)
+	if imageURL == "" {
+		// 没有图片链接，可能 content 本身就是有用的文本
+		return SilentResult(fmt.Sprintf("Image generation response: %s", content))
+	}
+
+	return t.downloadAndReturn(ctx, imageURL, prompt)
+}
+
+// parseSSEContent 从 SSE 流中提取所有 content 片段并拼接。
+func (t *GenerateImageTool) parseSSEContent(body io.Reader) string {
+	var contentBuilder strings.Builder
+	scanner := bufio.NewScanner(body)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var chunk chatCompletionsChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+
+		if len(chunk.Choices) > 0 {
+			contentBuilder.WriteString(chunk.Choices[0].Delta.Content)
+		}
+	}
+
+	return contentBuilder.String()
+}
+
+// mdImageRegex 匹配 markdown 图片语法 ![alt](url)
+var mdImageRegex = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
+
+// extractMarkdownImageURL 从文本中提取第一个 markdown 图片的 URL。
+func extractMarkdownImageURL(text string) string {
+	matches := mdImageRegex.FindStringSubmatch(text)
+	if len(matches) >= 3 {
+		return matches[2]
+	}
+	return ""
+}
+
+// saveAndReturn 保存图片字节到文件并返回结果。
+func (t *GenerateImageTool) saveAndReturn(ctx context.Context, imgBytes []byte, prompt string) *ToolResult {
 	imgDir := filepath.Join(t.workspace, "generated_images")
 	os.MkdirAll(imgDir, 0o755)
 
 	filename := fmt.Sprintf("img_%d.png", time.Now().UnixMilli())
 	imgPath := filepath.Join(imgDir, filename)
 
-	if imgData.B64JSON != "" {
-		// base64 解码并保存
-		decoded, err := base64.StdEncoding.DecodeString(imgData.B64JSON)
-		if err != nil {
-			return ErrorResult(fmt.Sprintf("failed to decode base64 image: %v", err))
-		}
-		if err := os.WriteFile(imgPath, decoded, 0o644); err != nil {
-			return ErrorResult(fmt.Sprintf("failed to save image: %v", err))
-		}
-	} else if imgData.URL != "" {
-		// 从 URL 下载图片
-		if err := t.downloadImage(ctx, imgData.URL, imgPath); err != nil {
-			return ErrorResult(fmt.Sprintf("failed to download image: %v", err))
-		}
-	} else {
-		return ErrorResult("API response contains no image data (neither b64_json nor url)")
+	if err := os.WriteFile(imgPath, imgBytes, 0o644); err != nil {
+		return ErrorResult(fmt.Sprintf("failed to save image: %v", err))
 	}
 
-	// 如果有 MediaStore，通过媒体管道发送
+	return t.buildResult(ctx, imgPath, filename, prompt)
+}
+
+// downloadAndReturn 从 URL 下载图片并返回结果。
+func (t *GenerateImageTool) downloadAndReturn(ctx context.Context, imageURL, prompt string) *ToolResult {
+	imgDir := filepath.Join(t.workspace, "generated_images")
+	os.MkdirAll(imgDir, 0o755)
+
+	// 根据 URL 推断扩展名，默认 .png
+	ext := ".png"
+	if strings.Contains(imageURL, ".jpg") || strings.Contains(imageURL, ".jpeg") {
+		ext = ".jpg"
+	} else if strings.Contains(imageURL, ".webp") {
+		ext = ".webp"
+	}
+	filename := fmt.Sprintf("img_%d%s", time.Now().UnixMilli(), ext)
+	imgPath := filepath.Join(imgDir, filename)
+
+	if err := t.downloadImage(ctx, imageURL, imgPath); err != nil {
+		return ErrorResult(fmt.Sprintf("failed to download image: %v", err))
+	}
+
+	return t.buildResult(ctx, imgPath, filename, prompt)
+}
+
+// buildResult 构建最终返回结果（通过 MediaStore 发送或返回文件路径）。
+func (t *GenerateImageTool) buildResult(ctx context.Context, imgPath, filename, prompt string) *ToolResult {
+	// 检测实际文件类型以设置正确的 Content-Type
+	contentType := "image/png"
+	if strings.HasSuffix(filename, ".jpg") || strings.HasSuffix(filename, ".jpeg") {
+		contentType = "image/jpeg"
+	} else if strings.HasSuffix(filename, ".webp") {
+		contentType = "image/webp"
+	}
+
 	channel := ToolChannel(ctx)
 	chatID := ToolChatID(ctx)
 	if t.mediaStore != nil && channel != "" && chatID != "" {
 		scope := fmt.Sprintf("tool:generate_image:%s:%s", channel, chatID)
 		ref, err := t.mediaStore.Store(imgPath, media.MediaMeta{
 			Filename:    filename,
-			ContentType: "image/png",
+			ContentType: contentType,
 			Source:      "tool:generate_image",
 		}, scope)
 		if err != nil {
-			// 媒体存储失败，回退到返回文件路径
 			return SilentResult(fmt.Sprintf("Image generated and saved to: %s (media store error: %v)", imgPath, err))
 		}
 		return MediaResult(
@@ -175,7 +316,6 @@ func (t *GenerateImageTool) Execute(ctx context.Context, args map[string]any) *T
 		)
 	}
 
-	// 无 MediaStore（CLI 模式），返回文件路径
 	return SilentResult(fmt.Sprintf("Image generated and saved to: %s", imgPath))
 }
 
@@ -206,8 +346,9 @@ func (t *GenerateImageTool) downloadImage(ctx context.Context, url, destPath str
 	return err
 }
 
-// OpenAI-compatible /v1/images/generations 请求和响应结构
+// ===== 请求/响应结构 =====
 
+// images_generations 格式
 type imageGenRequest struct {
 	Model          string `json:"model"`
 	Prompt         string `json:"prompt"`
@@ -224,4 +365,27 @@ type imageGenResponse struct {
 type imageGenData struct {
 	URL     string `json:"url,omitempty"`
 	B64JSON string `json:"b64_json,omitempty"`
+}
+
+// chat_completions 格式
+type chatCompletionsRequest struct {
+	Model    string        `json:"model"`
+	Messages []chatMessage `json:"messages"`
+	Stream   bool          `json:"stream"`
+}
+
+type chatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type chatCompletionsChunk struct {
+	Choices []chatCompletionsChoice `json:"choices"`
+}
+
+type chatCompletionsChoice struct {
+	Delta struct {
+		Content string `json:"content"`
+	} `json:"delta"`
+	FinishReason *string `json:"finish_reason"`
 }
