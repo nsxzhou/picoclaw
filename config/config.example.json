@@ -54,9 +54,7 @@
       "token": "YOUR_TELEGRAM_BOT_TOKEN",
       "base_url": "",
       "proxy": "",
-      "allow_from": [
-        "YOUR_USER_ID"
-      ],
+      "allow_from": ["YOUR_USER_ID"],
       "reasoning_channel_id": ""
     },
     "discord": {
@@ -288,19 +286,12 @@
         "filesystem": {
           "enabled": false,
           "command": "npx",
-          "args": [
-            "-y",
-            "@modelcontextprotocol/server-filesystem",
-            "/tmp"
-          ]
+          "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
         },
         "github": {
           "enabled": false,
           "command": "npx",
-          "args": [
-            "-y",
-            "@modelcontextprotocol/server-github"
-          ],
+          "args": ["-y", "@modelcontextprotocol/server-github"],
           "env": {
             "GITHUB_PERSONAL_ACCESS_TOKEN": "YOUR_GITHUB_TOKEN"
           }
@@ -308,10 +299,7 @@
         "brave-search": {
           "enabled": false,
           "command": "npx",
-          "args": [
-            "-y",
-            "@modelcontextprotocol/server-brave-search"
-          ],
+          "args": ["-y", "@modelcontextprotocol/server-brave-search"],
           "env": {
             "BRAVE_API_KEY": "YOUR_BRAVE_API_KEY"
           }
@@ -328,10 +316,7 @@
         "slack": {
           "enabled": false,
           "command": "npx",
-          "args": [
-            "-y",
-            "@modelcontextprotocol/server-slack"
-          ],
+          "args": ["-y", "@modelcontextprotocol/server-slack"],
           "env": {
             "SLACK_BOT_TOKEN": "YOUR_SLACK_BOT_TOKEN",
             "SLACK_TEAM_ID": "YOUR_SLACK_TEAM_ID"
@@ -409,6 +394,12 @@
     },
     "write_file": {
       "enabled": true
+    },
+    "generate_image": {
+      "enabled": false,
+      "api_key": "YOUR_IMAGE_API_KEY",
+      "api_base": "https://api.example.com",
+      "model": "dall-e-3"
     }
   },
   "heartbeat": {

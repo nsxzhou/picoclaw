@@ -617,6 +617,14 @@ type SkillsToolsConfig struct {
 	SearchCache           SearchCacheConfig      `                                   json:"search_cache"`
 }
 
+// ImageToolConfig 定义生图工具的独立配置
+type ImageToolConfig struct {
+	ToolConfig `         envPrefix:"PICOCLAW_TOOLS_GENERATE_IMAGE_"`
+	APIKey     string `                                             env:"PICOCLAW_TOOLS_GENERATE_IMAGE_API_KEY"  json:"api_key"`
+	APIBase    string `                                             env:"PICOCLAW_TOOLS_GENERATE_IMAGE_API_BASE" json:"api_base"`
+	Model      string `                                             env:"PICOCLAW_TOOLS_GENERATE_IMAGE_MODEL"    json:"model"`
+}
+
 type MediaCleanupConfig struct {
 	ToolConfig `    envPrefix:"PICOCLAW_MEDIA_CLEANUP_"`
 	MaxAge     int `                                    env:"PICOCLAW_MEDIA_CLEANUP_MAX_AGE"  json:"max_age_minutes"`
@@ -632,6 +640,7 @@ type ToolsConfig struct {
 	Skills          SkillsToolsConfig  `json:"skills"`
 	MediaCleanup    MediaCleanupConfig `json:"media_cleanup"`
 	MCP             MCPConfig          `json:"mcp"`
+	GenerateImage   ImageToolConfig    `json:"generate_image"                                           envPrefix:"PICOCLAW_TOOLS_GENERATE_IMAGE_"`
 	AppendFile      ToolConfig         `json:"append_file"                                              envPrefix:"PICOCLAW_TOOLS_APPEND_FILE_"`
 	EditFile        ToolConfig         `json:"edit_file"                                                envPrefix:"PICOCLAW_TOOLS_EDIT_FILE_"`
 	FindSkills      ToolConfig         `json:"find_skills"                                              envPrefix:"PICOCLAW_TOOLS_FIND_SKILLS_"`
@@ -920,6 +929,8 @@ func (t *ToolsConfig) IsToolEnabled(name string) bool {
 		return t.WriteFile.Enabled
 	case "mcp":
 		return t.MCP.Enabled
+	case "generate_image":
+		return t.GenerateImage.Enabled
 	default:
 		return true
 	}

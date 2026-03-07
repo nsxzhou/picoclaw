@@ -407,6 +407,11 @@ func DefaultConfig() *Config {
 			SendFile: ToolConfig{
 				Enabled: true,
 			},
+			GenerateImage: ImageToolConfig{
+				ToolConfig: ToolConfig{
+					Enabled: false, // 默认关闭，需用户配置 API 后启用
+				},
+			},
 			MCP: MCPConfig{
 				ToolConfig: ToolConfig{
 					Enabled: false,

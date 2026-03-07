@@ -92,6 +92,9 @@ func NewAgentInstance(
 	if cfg.Tools.IsToolEnabled("append_file") {
 		toolsRegistry.Register(tools.NewAppendFileTool(workspace, restrict, allowWritePaths))
 	}
+	if cfg.Tools.IsToolEnabled("generate_image") {
+		toolsRegistry.Register(tools.NewGenerateImageTool(workspace, cfg.Tools.GenerateImage, nil))
+	}
 
 	sessionsDir := filepath.Join(workspace, "sessions")
 	sessionsManager := session.NewSessionManager(sessionsDir)
