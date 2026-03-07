@@ -8,7 +8,7 @@
 
 ```mermaid
 graph LR
-    A[本地 Mac<br/>开发 & 合并上游] -->|git push| B[GitHub Fork<br/>nsxzhou/picoclaw]
+    A[本地 Mac<br/>拉取上游合并 & 开发] -->|git push| B[GitHub Fork<br/>nsxzhou/picoclaw]
     B -->|git pull| C[OpenCloudOS 8 服务器]
     C -->|docker compose build| D[Docker 镜像]
     D -->|docker compose up| E[picoclaw-gateway<br/>长驻运行]
@@ -16,9 +16,9 @@ graph LR
 
 项目提供两种 Docker 镜像：
 
-| 镜像类型 | Dockerfile | 基础镜像 | 特点 |
-|---------|-----------|---------|------|
-| **精简版** | [docker/Dockerfile](file:///Users/zhouzirui/code/picoclaw/docker/Dockerfile) | `alpine:3.23` | 仅 picoclaw 二进制，体积小 |
+| 镜像类型   | Dockerfile                                                                             | 基础镜像         | 特点                                    |
+| ---------- | -------------------------------------------------------------------------------------- | ---------------- | --------------------------------------- |
+| **精简版** | [docker/Dockerfile](file:///Users/zhouzirui/code/picoclaw/docker/Dockerfile)           | `alpine:3.23`    | 仅 picoclaw 二进制，体积小              |
 | **完整版** | [docker/Dockerfile.full](file:///Users/zhouzirui/code/picoclaw/docker/Dockerfile.full) | `node:24-alpine` | 含 Node.js + Python + uv，支持 MCP 工具 |
 
 > [!TIP]
@@ -95,9 +95,6 @@ sudo chown $USER:$USER /opt/picoclaw
 # 克隆你的 fork
 git clone https://github.com/nsxzhou/picoclaw.git /opt/picoclaw
 cd /opt/picoclaw
-
-# 添加上游远程仓库（方便后续合并更新）
-git remote add upstream https://github.com/sipeed/picoclaw.git
 ```
 
 ### 2.2 配置 config.json
@@ -119,19 +116,19 @@ vim /opt/picoclaw/config/config.json
     {
       "model_name": "你的模型名",
       "model": "openai/gpt-5.2",
-      "api_key": "sk-你的真实key",         // ← 填入真实 API Key
+      "api_key": "sk-你的真实key", // ← 填入真实 API Key
       "api_base": "https://api.openai.com/v1"
     }
   ],
   "channels": {
     "telegram": {
-      "enabled": true,                       // ← 启用你需要的频道
-      "token": "你的真实token",               // ← 填入真实 Token
-      "allow_from": ["你的用户ID"]            // ← 限制允许的用户
+      "enabled": true, // ← 启用你需要的频道
+      "token": "你的真实token", // ← 填入真实 Token
+      "allow_from": ["你的用户ID"] // ← 限制允许的用户
     }
   },
   "gateway": {
-    "host": "0.0.0.0",                       // ← 改为 0.0.0.0 以监听外部请求
+    "host": "0.0.0.0", // ← 改为 0.0.0.0 以监听外部请求
     "port": 18790
   }
 }
@@ -222,22 +219,41 @@ curl -s http://localhost:18790/health
 
 ## 第四阶段：日常更新流程
 
-这是你**最常用的操作**——合并上游更新并重新部署。
+这是你**最常用的操作**——在本地合并上游更新后，在服务器上重新部署。
 
-### 4.1 合并上游更新
+**这种“本地合并，服务器只发布”的模式是最佳实践，可以避免在服务器上处理合并冲突。**
+
+### 4.1 在本地电脑（Mac）合并更新并推送
+
+在你的 Mac 上执行：
 
 ```bash
-cd /opt/picoclaw
+# 进入你的本地仓库
+cd /path/to/your/local/picoclaw
+
+# 如果还没有添加上游仓库，只需执行一次
+git remote add upstream https://github.com/sipeed/picoclaw.git
 
 # 拉取上游最新代码
 git fetch upstream
 
-# 合并上游 main 分支到当前分支
+# 合并上游 main 分支到你当前的分支
 git merge upstream/main
 
-# 如果有冲突，解决后：
-# git add .
-# git commit -m "merge upstream"
+# 如果有冲突，在本地使用你熟悉的 IDE（如 VSCode）解决冲突
+# 解决完毕后提交并推送到你的 GitHub fork
+git push origin main
+```
+
+### 4.2 在服务器上拉取并部署
+
+在 OpenCloudOS 8 服务器上执行：
+
+```bash
+cd /opt/picoclaw
+
+# 拉取你的最新代码
+git pull origin main
 ```
 
 ### 4.2 重新构建 & 重启
@@ -263,13 +279,6 @@ cd /opt/picoclaw
 
 echo "=== 拉取最新代码 ==="
 git pull origin main
-
-echo "=== 合并上游更新 ==="
-git fetch upstream
-git merge upstream/main --no-edit || {
-    echo "❌ 合并冲突，请手动解决"
-    exit 1
-}
 
 echo "=== 重新构建镜像 ==="
 docker compose -f $COMPOSE_FILE build
@@ -395,22 +404,28 @@ sudo firewall-cmd --reload
 ## 常见问题
 
 ### Q: 构建时 `go mod download` 很慢？
+
 设置 Go 代理（在 Dockerfile 中添加）：
+
 ```dockerfile
 ENV GOPROXY=https://goproxy.cn,direct
 ```
 
 ### Q: Docker Compose 找不到 `--profile` 参数？
+
 确保 Docker Compose V2（`docker compose`），不是 V1（`docker-compose`）。
 
 ### Q: 端口 18790 被占用？
+
 ```bash
 sudo ss -tlnp | grep 18790
 # 修改 config.json 中的 gateway.port
 ```
 
 ### Q: 如何在不同环境使用不同配置？
+
 将 `config.json` 放在 Docker volume 外部挂载，不提交到 git：
+
 ```bash
 # config.json 已被 .gitignore 忽略（config/ 在 .dockerignore 中）
 ```
