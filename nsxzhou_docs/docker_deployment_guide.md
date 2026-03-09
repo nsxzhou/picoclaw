@@ -142,6 +142,69 @@ vim /opt/picoclaw/.env
 # 设置时区等环境变量
 ```
 
+### 2.4 飞书用户态文档操作的额外准备（可选）
+
+如果你计划在 Docker 部署里使用飞书文档 MCP，并启用这次新增的“单用户绑定 + CLI 授权”能力，需要额外完成以下准备。
+
+#### 2.4.1 在配置文件中填入飞书应用凭据
+
+编辑 `/opt/picoclaw/config/config.json`，确保至少包含：
+
+```json
+{
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "app_id": "cli_xxx",
+      "app_secret": "xxx"
+    }
+  },
+  "tools": {
+    "mcp": {
+      "enabled": true,
+      "servers": {
+        "feishu-doc": {
+          "enabled": true,
+          "command": "picoclaw",
+          "args": ["mcp-feishu-doc", "serve"]
+        }
+      }
+    }
+  }
+}
+```
+
+> [!TIP]
+> 飞书文档 sidecar 需要使用 `channels.feishu.app_id` 和 `channels.feishu.app_secret`。如果你只使用飞书聊天，不使用文档工具，可以不启用 `feishu-doc` MCP。
+
+#### 2.4.2 在飞书开放平台配置重定向 URL
+
+在飞书开放平台应用配置页的“重定向 URL”中添加：
+
+```text
+http://127.0.0.1:1456/auth/callback
+```
+
+这是 Feishu 用户态 OAuth 登录固定使用的回调地址。即使你最终在服务器 Docker 场景下走“手动粘贴回调 URL / code”的兜底流程，这个地址也必须先在开放平台中配置，否则无法获取授权码。
+
+#### 2.4.3 开通权限
+
+至少确保应用已经开通：
+
+- `docs:doc`
+- `drive:drive`
+
+这两个权限基本覆盖：
+
+- 文档搜索 / 浏览根空间 / 浏览文件夹
+- `docx` 读取
+- `docx` 创建 / 更新 / 评论
+- 分享设置
+- 成员权限管理
+- 删除文件
+
+如果你的机器人本身也运行在飞书频道中，还需要保留飞书消息收发相关权限（如 `im:message` 等）。
+
 ---
 
 ## 第三阶段：构建 & 启动
@@ -174,6 +237,100 @@ docker compose -f docker/docker-compose.full.yml build
 # 启动
 docker compose -f docker/docker-compose.full.yml --profile gateway up -d
 ```
+
+> [!IMPORTANT]
+> 当前仓库里的 [docker/docker-compose.full.yml](file:///Users/zhouzirui/code/picoclaw/docker/docker-compose.full.yml) 只持久化了 `workspace`，**不会自动持久化 `~/.picoclaw/auth.json`**。如果你要使用 Feishu 用户态绑定，必须额外持久化 `auth.json`，否则容器重建后登录状态会丢失。
+
+#### 3.2.1 为 Feishu 用户态登录持久化 `auth.json`
+
+先在宿主机创建认证文件：
+
+```bash
+mkdir -p /opt/picoclaw/data
+touch /opt/picoclaw/data/auth.json
+chmod 600 /opt/picoclaw/data/auth.json
+```
+
+然后修改 `docker/docker-compose.full.yml`，为 `picoclaw-agent` 和 `picoclaw-gateway` 都增加 `auth.json` 挂载：
+
+```diff
+ services:
+   picoclaw-agent:
+     volumes:
+       - ../config/config.json:/root/.picoclaw/config.json:ro
++      - ../data/auth.json:/root/.picoclaw/auth.json
+       - picoclaw-workspace:/root/.picoclaw/workspace
+       - picoclaw-npm-cache:/root/.npm
+ 
+   picoclaw-gateway:
+     volumes:
+       - ../config/config.json:/root/.picoclaw/config.json:ro
++      - ../data/auth.json:/root/.picoclaw/auth.json
+       - picoclaw-workspace:/root/.picoclaw/workspace
+       - picoclaw-npm-cache:/root/.npm
+```
+
+> [!NOTE]
+> `config.json` 继续保持只读挂载，`auth.json` 单独持久化即可。这样既能保住登录态，也不会把认证数据提交进 git。
+
+#### 3.2.2 在服务器 Docker 中完成 Feishu 绑定
+
+Feishu 登录在服务器 Docker 场景下**推荐使用 CLI + 手动粘贴回调 URL / code**，不要依赖自动 localhost 回调。
+
+原因是 OAuth 回调地址固定为：
+
+```text
+http://127.0.0.1:1456/auth/callback
+```
+
+当 PicoClaw 运行在服务器容器中，而你在本地电脑浏览器完成授权时，浏览器跳转到的 `127.0.0.1` 指向的是**你本地电脑**，不是服务器容器，因此自动回调通常不会成功。
+
+正确流程如下：
+
+```bash
+cd /opt/picoclaw
+
+# 确保容器已启动
+docker compose -f docker/docker-compose.full.yml --profile gateway up -d
+
+# 进入容器
+docker exec -it picoclaw-gateway-full sh
+
+# 在容器内执行登录
+picoclaw auth login --provider feishu
+```
+
+执行后，终端会打印一个飞书授权 URL。接下来：
+
+1. 将授权 URL 复制到你本地浏览器打开。
+2. 在浏览器中完成飞书授权。
+3. 浏览器最终会跳转到一个类似下面的地址：
+
+```text
+http://127.0.0.1:1456/auth/callback?code=xxx&state=yyy
+```
+
+4. 这一步在本地浏览器中可能显示无法打开，这是正常现象。
+5. 将浏览器地址栏中的**完整回调 URL**复制出来，粘贴回容器终端。
+6. 也可以只粘贴 `code`，但推荐粘贴完整 URL。
+
+登录成功后检查：
+
+```bash
+picoclaw auth status
+```
+
+确认输出中已经出现 Feishu 绑定信息以及对应的 `scope`。
+
+#### 3.2.3 运行时行为说明
+
+Feishu 文档工具启用后，Docker 中的行为与本地运行一致：
+
+- 没有 `feishu-user` 绑定时，继续走 app-mode
+- 已绑定且当前飞书发送者命中绑定身份时，走 user-mode
+- 已绑定但当前发送者不是绑定用户时，直接拒绝，不会回退到 app-mode
+
+这是 v1 的“单用户绑定实例”约束。
 
 ### 3.3 修改 docker-compose.yml 以支持本地构建
 
@@ -351,6 +508,9 @@ docker compose -f docker/docker-compose.full.yml logs --tail=100
 ```bash
 # 备份配置
 cp /opt/picoclaw/config/config.json /opt/picoclaw/config/config.json.bak
+
+# 备份 Feishu / OAuth 登录态（如果使用了 auth login）
+cp /opt/picoclaw/data/auth.json /opt/picoclaw/data/auth.json.bak
 
 # 备份 Docker volumes 数据
 docker run --rm \

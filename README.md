@@ -154,14 +154,14 @@ make build
 # Build for multiple platforms
 make build-all
 
-# Build for Raspberry Pi Zero 2 W (32-bit: make build-linux-arm; 64-bit: make build-linux-arm64)
+# Build for Raspberry Pi Zero 2 W (64-bit: make build-linux-arm64)
 make build-pi-zero
 
 # Build And Install
 make install
 ```
 
-**Raspberry Pi Zero 2 W:** Use the binary that matches your OS: 32-bit Raspberry Pi OS → `make build-linux-arm` (output: `build/picoclaw-linux-arm`); 64-bit → `make build-linux-arm64` (output: `build/picoclaw-linux-arm64`). Or run `make build-pi-zero` to build both.
+**Raspberry Pi Zero 2 W:** Use 64-bit Raspberry Pi OS and build with `make build-linux-arm64` (output: `build/picoclaw-linux-arm64`). `make build-pi-zero` now builds the same 64-bit target.
 
 ## 🐳 Docker Compose
 

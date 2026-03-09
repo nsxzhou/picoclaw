@@ -12,6 +12,7 @@ services:
       - agent
     volumes:
       - ../config/config.json:/root/.picoclaw/config.json:ro
+      - ../data/auth.json:/root/.picoclaw/auth.json
       - picoclaw-workspace:/root/.picoclaw/workspace
       - picoclaw-npm-cache:/root/.npm # npm cache for faster MCP server installs
     entrypoint: ["picoclaw", "agent"]
@@ -33,6 +34,8 @@ services:
     volumes:
       # Configuration file
       - ../config/config.json:/root/.picoclaw/config.json:ro
+      # Persistent auth state (Feishu user binding / OAuth tokens)
+      - ../data/auth.json:/root/.picoclaw/auth.json
       # Persistent workspace (sessions, memory, logs)
       - picoclaw-workspace:/root/.picoclaw/workspace
       # NPM cache for faster MCP server installs
