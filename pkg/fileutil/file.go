@@ -8,11 +8,15 @@
 package fileutil
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
+
+var renameFile = os.Rename
 
 // WriteFileAtomic atomically writes data to a file using a temp file + rename pattern.
 //
@@ -102,8 +106,17 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	// Atomic rename: temp file becomes the target
 	// On POSIX: rename() is atomic
 	// On Windows: Rename() is atomic for files
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("failed to rename temp file: %w", err)
+	if err := renameFile(tmpPath, path); err != nil {
+		// 中文注释：单文件 bind mount 常见于 Docker，rename 覆盖挂载点会返回 EBUSY。
+		// 这里降级为直接覆写目标文件，保留“可写入挂载文件”的兼容性。
+		if !shouldFallbackToDirectWrite(err) {
+			return fmt.Errorf("failed to rename temp file: %w", err)
+		}
+		if fallbackErr := writeFileDirect(path, data, perm); fallbackErr != nil {
+			return fmt.Errorf("failed to rename temp file: %w; direct write fallback failed: %v", err, fallbackErr)
+		}
+		cleanup = true
+		return nil
 	}
 
 	// Sync directory to ensure rename is durable
@@ -115,5 +128,35 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 
 	// Success: skip cleanup (file was renamed, no temp to remove)
 	cleanup = false
+	return nil
+}
+
+func shouldFallbackToDirectWrite(err error) bool {
+	return errors.Is(err, syscall.EBUSY) || errors.Is(err, syscall.EXDEV)
+}
+
+func writeFileDirect(path string, data []byte, perm os.FileMode) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return fmt.Errorf("failed to open target file for direct write: %w", err)
+	}
+	defer file.Close()
+
+	if _, err := file.Write(data); err != nil {
+		return fmt.Errorf("failed to write target file: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("failed to sync target file: %w", err)
+	}
+	if err := file.Chmod(perm); err != nil {
+		return fmt.Errorf("failed to set target permissions: %w", err)
+	}
+
+	dir := filepath.Dir(path)
+	if dirFile, err := os.Open(dir); err == nil {
+		_ = dirFile.Sync()
+		dirFile.Close()
+	}
+
 	return nil
 }
