@@ -9,6 +9,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -53,7 +54,9 @@ func NewPicoclawCommand() *cobra.Command {
 const (
 	colorBlue = "\033[1;38;2;62;93;185m"
 	colorRed  = "\033[1;38;2;213;70;70m"
-	banner    = "\r\n" +
+	// Feishu Docs MCP 通过 stdio 通信，启动时不能向 stdout 输出 banner。
+	mcpFeishuDocCommandName = "mcp-feishu-doc"
+	banner                  = "\r\n" +
 		colorBlue + "██████╗ ██╗ ██████╗ ██████╗ " + colorRed + " ██████╗██╗      █████╗ ██╗    ██╗\n" +
 		colorBlue + "██╔══██╗██║██╔════╝██╔═══██╗" + colorRed + "██╔════╝██║     ██╔══██╗██║    ██║\n" +
 		colorBlue + "██████╔╝██║██║     ██║   ██║" + colorRed + "██║     ██║     ███████║██║ █╗ ██║\n" +
@@ -63,8 +66,28 @@ const (
 		"\033[0m\r\n"
 )
 
+func shouldPrintBanner(args []string) bool {
+	for _, arg := range args[1:] {
+		if arg == "" {
+			continue
+		}
+		if arg == "--" {
+			return true
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+
+		return arg != mcpFeishuDocCommandName
+	}
+
+	return true
+}
+
 func main() {
-	fmt.Printf("%s", banner)
+	if shouldPrintBanner(os.Args) {
+		fmt.Printf("%s", banner)
+	}
 	cmd := NewPicoclawCommand()
 	if err := cmd.Execute(); err != nil {
 		os.Exit(1)

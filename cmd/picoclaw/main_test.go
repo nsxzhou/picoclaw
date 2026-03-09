@@ -55,3 +55,53 @@ func TestNewPicoclawCommand(t *testing.T) {
 		assert.False(t, subcmd.Hidden)
 	}
 }
+
+func TestShouldPrintBanner(t *testing.T) {
+	testCases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{
+			name: "default command",
+			args: []string{"picoclaw"},
+			want: true,
+		},
+		{
+			name: "regular subcommand",
+			args: []string{"picoclaw", "version"},
+			want: true,
+		},
+		{
+			name: "regular subcommand with global flag",
+			args: []string{"picoclaw", "--help"},
+			want: true,
+		},
+		{
+			name: "mcp feishu doc root command",
+			args: []string{"picoclaw", "mcp-feishu-doc"},
+			want: false,
+		},
+		{
+			name: "mcp feishu doc serve subcommand",
+			args: []string{"picoclaw", "mcp-feishu-doc", "serve"},
+			want: false,
+		},
+		{
+			name: "mcp feishu doc with trailing flag",
+			args: []string{"picoclaw", "mcp-feishu-doc", "--help"},
+			want: false,
+		},
+		{
+			name: "double dash stops command detection",
+			args: []string{"picoclaw", "--", "mcp-feishu-doc"},
+			want: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, shouldPrintBanner(tc.args))
+		})
+	}
+}
