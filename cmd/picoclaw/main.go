@@ -31,7 +31,7 @@ func NewPicoclawCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "picoclaw",
 		Short:   short,
-		Example: "picoclaw list",
+		Example: "picoclaw version",
 	}
 
 	cmd.AddCommand(
