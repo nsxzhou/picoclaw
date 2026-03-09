@@ -297,6 +297,11 @@
     "mcp": {
       "enabled": false,
       "servers": {
+        "feishu-doc": {
+          "enabled": false,
+          "command": "picoclaw",
+          "args": ["mcp-feishu-doc", "serve"]
+        },
         "context7": {
           "enabled": false,
           "type": "http",

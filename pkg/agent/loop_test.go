@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -342,6 +343,104 @@ func (m *countingMockProvider) GetDefaultModel() string {
 	return "counting-mock-model"
 }
 
+type toolCallEchoProvider struct {
+	toolName string
+	toolArgs map[string]any
+	calls    int
+}
+
+func (m *toolCallEchoProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	m.calls++
+	if m.calls == 1 {
+		return &providers.LLMResponse{
+			ToolCalls: []providers.ToolCall{
+				{
+					ID:        "call_1",
+					Name:      m.toolName,
+					Arguments: m.toolArgs,
+				},
+			},
+		}, nil
+	}
+
+	toolContent := ""
+	for _, msg := range messages {
+		if msg.Role == "tool" {
+			toolContent = msg.Content
+		}
+	}
+	return &providers.LLMResponse{
+		Content:   toolContent,
+		ToolCalls: []providers.ToolCall{},
+	}, nil
+}
+
+func (m *toolCallEchoProvider) GetDefaultModel() string {
+	return "tool-call-echo-model"
+}
+
+type captureArgsTool struct {
+	name   string
+	result *tools.ToolResult
+
+	mu   sync.Mutex
+	args []map[string]any
+}
+
+func (t *captureArgsTool) Name() string {
+	return t.name
+}
+
+func (t *captureArgsTool) Description() string {
+	return "capture args tool for testing"
+}
+
+func (t *captureArgsTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+	}
+}
+
+func (t *captureArgsTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
+	t.mu.Lock()
+	t.args = append(t.args, cloneTestArgs(args))
+	t.mu.Unlock()
+
+	if t.result != nil {
+		return t.result
+	}
+	return tools.SilentResult("ok")
+}
+
+func (t *captureArgsTool) Calls() []map[string]any {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	out := make([]map[string]any, 0, len(t.args))
+	for _, call := range t.args {
+		out = append(out, cloneTestArgs(call))
+	}
+	return out
+}
+
+func cloneTestArgs(args map[string]any) map[string]any {
+	if len(args) == 0 {
+		return map[string]any{}
+	}
+
+	out := make(map[string]any, len(args))
+	for k, v := range args {
+		out[k] = v
+	}
+	return out
+}
+
 // mockCustomTool is a simple mock tool for registration testing
 type mockCustomTool struct{}
 
@@ -572,6 +671,167 @@ func TestProcessMessage_SwitchModelShowModelConsistency(t *testing.T) {
 
 	if provider.calls != 0 {
 		t.Fatalf("LLM should not be called for /switch and /show, calls=%d", provider.calls)
+	}
+}
+
+func TestRunLLMIteration_FeishuDocToolInjectsHiddenArgs(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				Model:             "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	provider := &toolCallEchoProvider{
+		toolName: "mcp_feishu-doc_doc_read",
+		toolArgs: map[string]any{
+			"doc_token": "doccnInjectedArgs",
+		},
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+
+	tool := &captureArgsTool{
+		name:   "mcp_feishu-doc_doc_read",
+		result: tools.SilentResult("tool executed"),
+	}
+	al.RegisterTool(tool)
+
+	helper := testHelper{al: al}
+	response := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:  "feishu",
+		SenderID: "user-100",
+		ChatID:   "chat-200",
+		Content:  "读取文档",
+		Peer: bus.Peer{
+			Kind: "direct",
+			ID:   "user-100",
+		},
+	})
+
+	if response != "tool executed" {
+		t.Fatalf("expected response from tool result, got %q", response)
+	}
+	if provider.calls != 2 {
+		t.Fatalf("expected provider called twice, got %d", provider.calls)
+	}
+
+	calls := tool.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("expected tool executed once, got %d", len(calls))
+	}
+
+	callArgs := calls[0]
+	if got := callArgs["doc_token"]; got != "doccnInjectedArgs" {
+		t.Fatalf("expected doc_token preserved, got %v", got)
+	}
+	if got := callArgs["__channel"]; got != "feishu" {
+		t.Fatalf("expected __channel=feishu, got %v", got)
+	}
+	if got := callArgs["__chat_id"]; got != "chat-200" {
+		t.Fatalf("expected __chat_id=chat-200, got %v", got)
+	}
+	if got := callArgs["__sender_id"]; got != "user-100" {
+		t.Fatalf("expected __sender_id=user-100, got %v", got)
+	}
+}
+
+func TestRunLLMIteration_FeishuDocToolBlockedOutsideFeishu(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				Model:             "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	provider := &toolCallEchoProvider{
+		toolName: "mcp_feishu-doc_doc_read",
+		toolArgs: map[string]any{
+			"doc_token": "doccnBlocked",
+		},
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+
+	tool := &captureArgsTool{
+		name:   "mcp_feishu-doc_doc_read",
+		result: tools.SilentResult("should not run"),
+	}
+	al.RegisterTool(tool)
+
+	helper := testHelper{al: al}
+	response := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "user-101",
+		ChatID:   "chat-201",
+		Content:  "读取文档",
+		Peer: bus.Peer{
+			Kind: "direct",
+			ID:   "user-101",
+		},
+	})
+
+	if !strings.Contains(response, "restricted to feishu channel") {
+		t.Fatalf("expected restricted error in response, got %q", response)
+	}
+	if provider.calls != 2 {
+		t.Fatalf("expected provider called twice, got %d", provider.calls)
+	}
+	if len(tool.Calls()) != 0 {
+		t.Fatalf("expected tool not executed outside feishu channel, got %d calls", len(tool.Calls()))
+	}
+}
+
+func TestIsFeishuDocMCPTool(t *testing.T) {
+	tests := []struct {
+		name     string
+		toolName string
+		want     bool
+	}{
+		{
+			name:     "kebab prefix",
+			toolName: "mcp_feishu-doc_doc_read",
+			want:     true,
+		},
+		{
+			name:     "snake prefix compatibility",
+			toolName: "mcp_feishu_doc_doc_read",
+			want:     true,
+		},
+		{
+			name:     "unrelated tool",
+			toolName: "mcp_context7_query_docs",
+			want:     false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isFeishuDocMCPTool(tc.toolName)
+			if got != tc.want {
+				t.Fatalf("isFeishuDocMCPTool(%q) = %v, want %v", tc.toolName, got, tc.want)
+			}
+		})
 	}
 }
 

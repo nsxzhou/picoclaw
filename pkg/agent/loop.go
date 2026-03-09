@@ -55,6 +55,7 @@ type processOptions struct {
 	SessionKey      string   // Session identifier for history/context
 	Channel         string   // Target channel for tool execution
 	ChatID          string   // Target chat ID for tool execution
+	SenderID        string   // Sender ID for tool-scoped access control and auditing
 	UserMessage     string   // User message content (may include prefix)
 	Media           []string // media:// refs from inbound message
 	DefaultResponse string   // Response when LLM returns empty
@@ -71,6 +72,9 @@ const (
 	metadataKeyTeamID         = "team_id"
 	metadataKeyParentPeerKind = "parent_peer_kind"
 	metadataKeyParentPeerID   = "parent_peer_id"
+	feishuChannelName         = "feishu"
+	feishuDocMCPPrefixSnake   = "mcp_feishu_doc_"
+	feishuDocMCPPrefixKebab   = "mcp_feishu-doc_"
 )
 
 func NewAgentLoop(
@@ -546,6 +550,7 @@ func (al *AgentLoop) ProcessHeartbeat(
 		SessionKey:      "heartbeat",
 		Channel:         channel,
 		ChatID:          chatID,
+		SenderID:        "cron",
 		UserMessage:     content,
 		DefaultResponse: defaultResponse,
 		EnableSummary:   false,
@@ -619,6 +624,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		SessionKey:      sessionKey,
 		Channel:         msg.Channel,
 		ChatID:          msg.ChatID,
+		SenderID:        msg.SenderID,
 		UserMessage:     msg.Content,
 		Media:           msg.Media,
 		DefaultResponse: defaultResponse,
@@ -713,6 +719,7 @@ func (al *AgentLoop) processSystemMessage(
 		SessionKey:      sessionKey,
 		Channel:         originChannel,
 		ChatID:          originChatID,
+		SenderID:        msg.SenderID,
 		UserMessage:     fmt.Sprintf("[System: %s] %s", msg.SenderID, msg.Content),
 		DefaultResponse: "Background task completed.",
 		EnableSummary:   false,
@@ -1137,7 +1144,26 @@ func (al *AgentLoop) runLLMIteration(
 			go func(idx int, tc providers.ToolCall) {
 				defer wg.Done()
 
-				argsJSON, _ := json.Marshal(tc.Arguments)
+				toolArgs := cloneToolArguments(tc.Arguments)
+				if isFeishuDocMCPTool(tc.Name) {
+					// 限制 Feishu Docs MCP 仅在飞书会话内执行，避免跨渠道越权访问。
+					if opts.Channel != feishuChannelName {
+						err := fmt.Errorf("tool %q is restricted to feishu channel", tc.Name)
+						logger.WarnCF("agent", "Blocked feishu-doc MCP tool outside feishu channel",
+							map[string]any{
+								"tool":      tc.Name,
+								"channel":   opts.Channel,
+								"chat_id":   opts.ChatID,
+								"sender_id": opts.SenderID,
+							})
+						agentResults[idx].result = tools.ErrorResult(err.Error()).WithError(err)
+						return
+					}
+					// 对 Feishu Docs MCP 注入隐藏上下文参数，用于服务端审计与确认绑定。
+					toolArgs = injectFeishuDocHiddenArgs(toolArgs, opts)
+				}
+
+				argsJSON, _ := json.Marshal(toolArgs)
 				argsPreview := utils.Truncate(string(argsJSON), 200)
 				logger.InfoCF("agent", fmt.Sprintf("Tool call: %s(%s)", tc.Name, argsPreview),
 					map[string]any{
@@ -1192,7 +1218,7 @@ func (al *AgentLoop) runLLMIteration(
 				toolResult := agent.Tools.ExecuteWithContext(
 					ctx,
 					tc.Name,
-					tc.Arguments,
+					toolArgs,
 					opts.Channel,
 					opts.ChatID,
 					asyncCallback,
@@ -1258,6 +1284,34 @@ func (al *AgentLoop) runLLMIteration(
 	}
 
 	return finalContent, iteration, nil
+}
+
+func isFeishuDocMCPTool(toolName string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(toolName))
+	return strings.HasPrefix(normalized, feishuDocMCPPrefixSnake) ||
+		strings.HasPrefix(normalized, feishuDocMCPPrefixKebab)
+}
+
+func cloneToolArguments(args map[string]any) map[string]any {
+	if len(args) == 0 {
+		return map[string]any{}
+	}
+
+	cloned := make(map[string]any, len(args))
+	for k, v := range args {
+		cloned[k] = v
+	}
+	return cloned
+}
+
+func injectFeishuDocHiddenArgs(args map[string]any, opts processOptions) map[string]any {
+	if args == nil {
+		args = make(map[string]any, 3)
+	}
+	args["__channel"] = opts.Channel
+	args["__chat_id"] = opts.ChatID
+	args["__sender_id"] = opts.SenderID
+	return args
 }
 
 // selectCandidates returns the model candidates and resolved model name to use

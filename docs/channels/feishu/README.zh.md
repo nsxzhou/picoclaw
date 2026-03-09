@@ -35,3 +35,37 @@
 3. 配置事件订阅和Webhook URL
 4. 设置加密(可选,生产环境建议启用)
 5. 将 App ID、App Secret、Encrypt Key 和 Verification Token(如果启用加密) 填入配置文件中
+
+## 文档能力扩展（Feishu Docs MCP）
+
+如果你希望 PicoClaw 在飞书会话里直接读写飞书文档，可启用内置 MCP sidecar：
+
+```json
+{
+  "tools": {
+    "mcp": {
+      "enabled": true,
+      "servers": {
+        "feishu-doc": {
+          "enabled": true,
+          "command": "picoclaw",
+          "args": ["mcp-feishu-doc", "serve"]
+        }
+      }
+    }
+  }
+}
+```
+
+权限建议（飞书开放平台）：
+
+1. 文档读取与导出：`docs:doc`
+2. 文档创建/编辑：`docx:document` 相关读写权限
+3. 云空间文件与权限管理：`drive:*` 中与你要使用的能力对应权限（评论、分享、成员权限、删除）
+
+说明：
+
+1. 该 sidecar 使用 `channels.feishu.app_id/app_secret` 鉴权。
+2. 写操作采用二次确认（先返回 `action_id`，再携带确认语重试）。
+3. 审计日志默认写入工作区 `state/feishu_doc_audit.jsonl`。
+4. MCP 工具名前缀示例：`mcp_feishu-doc_doc_read`。

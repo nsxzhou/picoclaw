@@ -170,6 +170,31 @@ The MCP tool enables integration with external Model Context Protocol servers.
 }
 ```
 
+#### 3) Built-in Feishu Docs MCP sidecar
+
+```json
+{
+  "tools": {
+    "mcp": {
+      "enabled": true,
+      "servers": {
+        "feishu-doc": {
+          "enabled": true,
+          "command": "picoclaw",
+          "args": ["mcp-feishu-doc", "serve"]
+        }
+      }
+    }
+  }
+}
+```
+
+Notes:
+
+- This sidecar reads Feishu app credentials from `channels.feishu.app_id` and `channels.feishu.app_secret`.
+- Tool names are exposed with MCP prefix, for example `mcp_feishu-doc_doc_read`.
+- Feishu Docs MCP tools are restricted to Feishu channel conversations by the agent runtime.
+
 ## Skills Tool
 
 The skills tool configures skill discovery and installation via registries like ClawHub.
@@ -217,4 +242,5 @@ For example:
 - `PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES=10`
 - `PICOCLAW_TOOLS_MCP_ENABLED=true`
 
-Note: Nested map-style config (for example `tools.mcp.servers.<name>.*`) is configured in `config.json` rather than environment variables.
+Note: Nested map-style config (for example `tools.mcp.servers.<name>.*`)
+is configured in `config.json` rather than environment variables.
