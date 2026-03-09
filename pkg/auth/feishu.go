@@ -25,12 +25,45 @@ const (
 	FeishuRedirectURI        = "http://127.0.0.1:1456/auth/callback"
 )
 
+var feishuRequiredScopes = []string{
+	"auth:user.id:read",
+	"docs:doc",
+	"docx:document",
+	"drive:drive",
+	"offline_access",
+}
+
+// RequiredFeishuScopes 返回 PicoClaw Feishu 文档能力所需的固定授权范围。
+func RequiredFeishuScopes() []string {
+	return append([]string(nil), feishuRequiredScopes...)
+}
+
+// MissingFeishuScopes 返回当前授权结果里缺失的必需 scope。
+func MissingFeishuScopes(granted []string) []string {
+	grantedSet := make(map[string]struct{}, len(granted))
+	for _, scope := range granted {
+		scope = strings.TrimSpace(scope)
+		if scope != "" {
+			grantedSet[scope] = struct{}{}
+		}
+	}
+
+	missing := make([]string, 0, len(feishuRequiredScopes))
+	for _, scope := range feishuRequiredScopes {
+		if _, ok := grantedSet[scope]; !ok {
+			missing = append(missing, scope)
+		}
+	}
+	return missing
+}
+
 // BuildFeishuAuthorizeURL 构造飞书用户态授权地址。
 func BuildFeishuAuthorizeURL(appID string, pkce PKCECodes, state, redirectURI string) string {
 	params := url.Values{
 		"response_type":         {"code"},
 		"client_id":             {strings.TrimSpace(appID)},
 		"redirect_uri":          {strings.TrimSpace(redirectURI)},
+		"scope":                 {strings.Join(feishuRequiredScopes, " ")},
 		"code_challenge":        {pkce.CodeChallenge},
 		"code_challenge_method": {"S256"},
 		"state":                 {state},

@@ -94,6 +94,16 @@ func (s *Server) selectAuthContext(meta invokeMeta) (*callAuthContext, error) {
 			SenderRawID:        ctx.SenderRawID,
 		}, fmt.Errorf("feishu binding is missing access token")
 	}
+	if missing := auth.MissingFeishuScopes(cred.Scope); len(missing) > 0 {
+		return &callAuthContext{
+				Mode:               authModeUser,
+				BoundIdentityMatch: boolPtr(true),
+				SenderRawID:        ctx.SenderRawID,
+			}, fmt.Errorf(
+				"当前飞书绑定缺少文档权限（缺失: %s）。请先在飞书开放平台开通对应权限，然后重新执行 picoclaw auth login --provider feishu 或在 launcher 中重新登录",
+				strings.Join(missing, ", "),
+			)
+	}
 
 	return &callAuthContext{
 		Mode:               authModeUser,

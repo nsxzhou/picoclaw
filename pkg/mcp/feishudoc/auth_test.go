@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/auth"
@@ -73,6 +74,7 @@ func TestSelectAuthContextUsesUserModeOnBoundMatch(t *testing.T) {
 		AuthMethod:  "oauth",
 		AccessToken: "user-token",
 		OpenID:      "ou_bound",
+		Scope:       auth.RequiredFeishuScopes(),
 	}); err != nil {
 		t.Fatalf("save credential: %v", err)
 	}
@@ -102,6 +104,7 @@ func TestSelectAuthContextRejectsMismatchedSender(t *testing.T) {
 		AuthMethod:  "oauth",
 		AccessToken: "user-token",
 		UserID:      "u_bound",
+		Scope:       auth.RequiredFeishuScopes(),
 	}); err != nil {
 		t.Fatalf("save credential: %v", err)
 	}
@@ -131,6 +134,7 @@ func TestSelectAuthContextLoadsCredentialFromProviderKeyedStore(t *testing.T) {
 		AuthMethod:  "oauth",
 		AccessToken: "user-token",
 		UnionID:     "on_bound",
+		Scope:       auth.RequiredFeishuScopes(),
 	}); err != nil {
 		t.Fatalf("save credential: %v", err)
 	}
@@ -150,5 +154,35 @@ func TestSelectAuthContextLoadsCredentialFromProviderKeyedStore(t *testing.T) {
 	}
 	if authCtx.Mode != authModeUser {
 		t.Fatalf("expected user mode, got %s", authCtx.Mode)
+	}
+}
+
+func TestSelectAuthContextRejectsBindingWithMissingScopes(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("PICOCLAW_HOME", tempHome)
+
+	if err := auth.SetCredential(auth.FeishuCredentialProvider, &auth.AuthCredential{
+		Provider:    auth.FeishuCredentialProvider,
+		AuthMethod:  "oauth",
+		AccessToken: "user-token",
+		OpenID:      "ou_bound",
+		Scope:       []string{"auth:user.id:read"},
+	}); err != nil {
+		t.Fatalf("save credential: %v", err)
+	}
+
+	srv := &Server{appID: "app-id", appSecret: "app-secret"}
+	authCtx, err := srv.selectAuthContext(newInvokeMeta("feishu", "chat-1", "feishu:ou_bound"))
+	if err == nil {
+		t.Fatal("expected missing scope error")
+	}
+	if authCtx == nil || authCtx.Mode != authModeUser {
+		t.Fatalf("expected user-mode auth context, got %+v", authCtx)
+	}
+	if !strings.Contains(err.Error(), "缺少文档权限") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "docx:document") {
+		t.Fatalf("expected missing scope details, got %v", err)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -281,6 +282,56 @@ func TestAuthLogin_InvalidBody(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for invalid JSON body, got %d", w.Code)
+	}
+}
+
+func TestAuthLogin_FeishuReturnsAuthURLWithRequiredScopes(t *testing.T) {
+	setupAuthHome(t)
+	cfg := &config.Config{}
+	cfg.Channels.Feishu.AppID = "cli_test"
+	cfg.Channels.Feishu.AppSecret = "secret"
+	mux, _ := setupConfigMux(t, cfg)
+
+	activeFeishuOAuthSessionMu.Lock()
+	activeFeishuOAuthSession = nil
+	activeFeishuOAuthSessionMu.Unlock()
+
+	t.Cleanup(func() {
+		activeFeishuOAuthSessionMu.Lock()
+		session := activeFeishuOAuthSession
+		activeFeishuOAuthSession = nil
+		activeFeishuOAuthSessionMu.Unlock()
+		if session != nil && session.CallbackSrv != nil {
+			_ = session.CallbackSrv.Close()
+		}
+	})
+
+	req := httptest.NewRequest("POST", "/api/auth/login", strings.NewReader(`{"provider":"feishu"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Host = "127.0.0.1:8080"
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST /api/auth/login: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Status  string `json:"status"`
+		AuthURL string `json:"auth_url"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "redirect" {
+		t.Fatalf("status = %q, want redirect", resp.Status)
+	}
+	authURL, err := url.Parse(resp.AuthURL)
+	if err != nil {
+		t.Fatalf("parse auth_url: %v", err)
+	}
+	if got := authURL.Query().Get("scope"); got != strings.Join(auth.RequiredFeishuScopes(), " ") {
+		t.Fatalf("scope = %q, want %q", got, strings.Join(auth.RequiredFeishuScopes(), " "))
 	}
 }
 

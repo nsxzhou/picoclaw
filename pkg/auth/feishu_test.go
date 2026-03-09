@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -22,6 +23,13 @@ func TestBuildFeishuAuthorizeURL(t *testing.T) {
 	}
 	if !strings.Contains(got, "state=state-1") {
 		t.Fatalf("missing state: %s", got)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse authorize url: %v", err)
+	}
+	if scope := u.Query().Get("scope"); scope != strings.Join(RequiredFeishuScopes(), " ") {
+		t.Fatalf("scope = %q, want %q", scope, strings.Join(RequiredFeishuScopes(), " "))
 	}
 }
 
@@ -49,7 +57,7 @@ func TestFeishuCredentialFromTokenPayload(t *testing.T) {
 			"access_token":  "u-token",
 			"refresh_token": "r-token",
 			"expires_in":    7200,
-			"scope":         "docs:doc drive:file",
+			"scope":         "auth:user.id:read docs:doc docx:document drive:drive offline_access",
 		},
 	}
 	cred, err := feishuCredentialFromTokenPayload(root)
@@ -59,8 +67,15 @@ func TestFeishuCredentialFromTokenPayload(t *testing.T) {
 	if cred.AccessToken != "u-token" || cred.RefreshToken != "r-token" {
 		t.Fatalf("unexpected credential: %+v", cred)
 	}
-	if len(cred.Scope) != 2 {
-		t.Fatalf("scope len = %d, want 2", len(cred.Scope))
+	if len(cred.Scope) != len(RequiredFeishuScopes()) {
+		t.Fatalf("scope len = %d, want %d", len(cred.Scope), len(RequiredFeishuScopes()))
+	}
+}
+
+func TestMissingFeishuScopes(t *testing.T) {
+	missing := MissingFeishuScopes([]string{"auth:user.id:read", "docs:doc"})
+	if strings.Join(missing, ",") != "docx:document,drive:drive,offline_access" {
+		t.Fatalf("missing = %q", strings.Join(missing, ","))
 	}
 }
 

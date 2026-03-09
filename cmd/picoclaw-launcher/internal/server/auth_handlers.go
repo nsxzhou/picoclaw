@@ -8,8 +8,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
-	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -21,9 +19,6 @@ import (
 
 const (
 	feishuCredentialProvider = "feishu-user"
-	feishuAuthorizeURL       = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
-	feishuTokenURL           = "https://open.feishu.cn/open-apis/authen/v2/oauth/token"
-	feishuUserInfoURL        = "https://open.feishu.cn/open-apis/authen/v1/user_info"
 	feishuRedirectURI        = "http://127.0.0.1:1456/auth/callback"
 	feishuCallbackAddr       = "127.0.0.1:1456"
 	feishuLoginTimeout       = 5 * time.Minute
@@ -288,7 +283,7 @@ func handleFeishuLogin(w http.ResponseWriter, r *http.Request, configPath string
 		ReturnURL:   fmt.Sprintf("http://%s/#auth", r.Host),
 		Status:      "pending",
 	}
-	session.AuthURL = buildFeishuAuthorizeURL(appID, pkce, state, feishuRedirectURI)
+	session.AuthURL = auth.BuildFeishuAuthorizeURL(appID, pkce, state, feishuRedirectURI)
 
 	if err := startFeishuCallbackServer(session, appID, appSecret); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to start localhost callback server: %v", err), http.StatusInternalServerError)
@@ -454,7 +449,7 @@ func handleFeishuCallback(w http.ResponseWriter, r *http.Request, session *oauth
 		return
 	}
 
-	cred, err := exchangeFeishuCode(code, session.PKCE.CodeVerifier, session.RedirectURI, appID, appSecret)
+	cred, err := auth.ExchangeFeishuCode(appID, appSecret, code, session.PKCE.CodeVerifier, session.RedirectURI)
 	if err != nil {
 		session.Status = "error"
 		session.Error = err.Error()
@@ -475,72 +470,6 @@ func handleFeishuCallback(w http.ResponseWriter, r *http.Request, session *oauth
 	session.Done = true
 
 	renderLauncherRedirect(w, "Authentication successful!", "Redirecting back to Config Editor...", session.ReturnURL)
-}
-
-func buildFeishuAuthorizeURL(appID string, pkce auth.PKCECodes, state, redirectURI string) string {
-	params := url.Values{
-		"response_type":         {"code"},
-		"client_id":             {appID},
-		"redirect_uri":          {redirectURI},
-		"code_challenge":        {pkce.CodeChallenge},
-		"code_challenge_method": {"S256"},
-		"state":                 {state},
-	}
-	return feishuAuthorizeURL + "?" + params.Encode()
-}
-
-func exchangeFeishuCode(
-	code string,
-	codeVerifier string,
-	redirectURI string,
-	appID string,
-	appSecret string,
-) (*auth.AuthCredential, error) {
-	payload := map[string]any{
-		"grant_type":    "authorization_code",
-		"code":          code,
-		"client_id":     appID,
-		"client_secret": appSecret,
-		"redirect_uri":  redirectURI,
-		"code_verifier": codeVerifier,
-	}
-
-	root, err := doJSONRequest(feishuTokenURL, payload, "")
-	if err != nil {
-		return nil, fmt.Errorf("token exchange failed: %w", err)
-	}
-	body := nestedPayload(root)
-
-	accessToken := mapString(body, "access_token")
-	if accessToken == "" {
-		return nil, fmt.Errorf("token exchange failed: missing access_token")
-	}
-
-	cred := &auth.AuthCredential{
-		AccessToken:  accessToken,
-		RefreshToken: mapString(body, "refresh_token"),
-		Provider:     feishuCredentialProvider,
-		AuthMethod:   "oauth",
-	}
-
-	if expiresIn := mapInt(body, "expires_in"); expiresIn > 0 {
-		cred.ExpiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second)
-	}
-
-	userInfoRoot, err := doJSONRequest(feishuUserInfoURL, nil, accessToken)
-	if err != nil {
-		return nil, fmt.Errorf("fetch user info failed: %w", err)
-	}
-	userInfo := nestedPayload(userInfoRoot)
-
-	cred.Email = mapString(userInfo, "email")
-	setOptionalCredentialString(cred, "DisplayName", firstNonEmpty(mapString(userInfo, "name"), mapString(userInfo, "en_name")))
-	setOptionalCredentialString(cred, "TenantKey", mapString(userInfo, "tenant_key"))
-	setOptionalCredentialString(cred, "UserID", mapString(userInfo, "user_id"))
-	setOptionalCredentialString(cred, "OpenID", mapString(userInfo, "open_id"))
-	setOptionalCredentialString(cred, "UnionID", mapString(userInfo, "union_id"))
-	setOptionalCredentialScope(cred, mapStringSlice(userInfo["scope"]))
-	return cred, nil
 }
 
 func doJSONRequest(endpoint string, payload map[string]any, accessToken string) (map[string]any, error) {
@@ -642,87 +571,6 @@ func mapInt(root map[string]any, key string) int {
 		return int(n)
 	default:
 		return 0
-	}
-}
-
-func mapStringSlice(raw any) []string {
-	switch value := raw.(type) {
-	case []string:
-		return value
-	case []any:
-		out := make([]string, 0, len(value))
-		for _, item := range value {
-			s := strings.TrimSpace(fmt.Sprint(item))
-			if s != "" {
-				out = append(out, s)
-			}
-		}
-		return out
-	case string:
-		if strings.TrimSpace(value) == "" {
-			return nil
-		}
-		parts := strings.FieldsFunc(value, func(r rune) bool {
-			return r == ',' || r == ' '
-		})
-		out := make([]string, 0, len(parts))
-		for _, part := range parts {
-			part = strings.TrimSpace(part)
-			if part != "" {
-				out = append(out, part)
-			}
-		}
-		return out
-	default:
-		return nil
-	}
-}
-
-func setOptionalCredentialString(cred *auth.AuthCredential, fieldName, value string) {
-	if cred == nil || strings.TrimSpace(value) == "" {
-		return
-	}
-	structValue := reflect.ValueOf(cred)
-	if structValue.Kind() == reflect.Pointer {
-		structValue = structValue.Elem()
-	}
-	if !structValue.IsValid() || structValue.Kind() != reflect.Struct {
-		return
-	}
-	field := structValue.FieldByName(fieldName)
-	if !field.IsValid() || !field.CanSet() || field.Kind() != reflect.String {
-		return
-	}
-	field.SetString(value)
-}
-
-func setOptionalCredentialScope(cred *auth.AuthCredential, scope []string) {
-	if cred == nil || len(scope) == 0 {
-		return
-	}
-	structValue := reflect.ValueOf(cred)
-	if structValue.Kind() == reflect.Pointer {
-		structValue = structValue.Elem()
-	}
-	if !structValue.IsValid() || structValue.Kind() != reflect.Struct {
-		return
-	}
-	field := structValue.FieldByName("Scope")
-	if !field.IsValid() || !field.CanSet() {
-		return
-	}
-	switch field.Kind() {
-	case reflect.String:
-		field.SetString(strings.Join(scope, ", "))
-	case reflect.Slice:
-		if field.Type().Elem().Kind() != reflect.String {
-			return
-		}
-		values := reflect.MakeSlice(field.Type(), 0, len(scope))
-		for _, item := range scope {
-			values = reflect.Append(values, reflect.ValueOf(item))
-		}
-		field.Set(values)
 	}
 }
 
