@@ -185,4 +185,7 @@ func TestSelectAuthContextRejectsBindingWithMissingScopes(t *testing.T) {
 	if !strings.Contains(err.Error(), "docx:document") {
 		t.Fatalf("expected missing scope details, got %v", err)
 	}
+	if !strings.Contains(err.Error(), "docx:document.block:convert") {
+		t.Fatalf("expected convert scope details, got %v", err)
+	}
 }

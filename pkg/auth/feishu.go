@@ -29,6 +29,7 @@ var feishuRequiredScopes = []string{
 	"auth:user.id:read",
 	"docs:doc",
 	"docx:document",
+	"docx:document.block:convert",
 	"drive:drive",
 	"offline_access",
 }

@@ -57,7 +57,7 @@ func TestFeishuCredentialFromTokenPayload(t *testing.T) {
 			"access_token":  "u-token",
 			"refresh_token": "r-token",
 			"expires_in":    7200,
-			"scope":         "auth:user.id:read docs:doc docx:document drive:drive offline_access",
+			"scope":         "auth:user.id:read docs:doc docx:document docx:document.block:convert drive:drive offline_access",
 		},
 	}
 	cred, err := feishuCredentialFromTokenPayload(root)
@@ -74,7 +74,7 @@ func TestFeishuCredentialFromTokenPayload(t *testing.T) {
 
 func TestMissingFeishuScopes(t *testing.T) {
 	missing := MissingFeishuScopes([]string{"auth:user.id:read", "docs:doc"})
-	if strings.Join(missing, ",") != "docx:document,drive:drive,offline_access" {
+	if strings.Join(missing, ",") != "docx:document,docx:document.block:convert,drive:drive,offline_access" {
 		t.Fatalf("missing = %q", strings.Join(missing, ","))
 	}
 }
