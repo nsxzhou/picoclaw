@@ -2,8 +2,10 @@ package auth
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
@@ -18,10 +20,86 @@ type AuthCredential struct {
 	AuthMethod   string    `json:"auth_method"`
 	Email        string    `json:"email,omitempty"`
 	ProjectID    string    `json:"project_id,omitempty"`
+	Scope        []string  `json:"scope,omitempty"`
+	TenantKey    string    `json:"tenant_key,omitempty"`
+	UserID       string    `json:"user_id,omitempty"`
+	OpenID       string    `json:"open_id,omitempty"`
+	UnionID      string    `json:"union_id,omitempty"`
+	DisplayName  string    `json:"display_name,omitempty"`
 }
 
 type AuthStore struct {
 	Credentials map[string]*AuthCredential `json:"credentials"`
+}
+
+func (c *AuthCredential) UnmarshalJSON(data []byte) error {
+	type rawCredential struct {
+		AccessToken  string          `json:"access_token"`
+		RefreshToken string          `json:"refresh_token,omitempty"`
+		AccountID    string          `json:"account_id,omitempty"`
+		ExpiresAt    time.Time       `json:"expires_at,omitempty"`
+		Provider     string          `json:"provider"`
+		AuthMethod   string          `json:"auth_method"`
+		Email        string          `json:"email,omitempty"`
+		ProjectID    string          `json:"project_id,omitempty"`
+		Scope        json.RawMessage `json:"scope,omitempty"`
+		TenantKey    string          `json:"tenant_key,omitempty"`
+		UserID       string          `json:"user_id,omitempty"`
+		OpenID       string          `json:"open_id,omitempty"`
+		UnionID      string          `json:"union_id,omitempty"`
+		DisplayName  string          `json:"display_name,omitempty"`
+	}
+
+	var decoded rawCredential
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+
+	*c = AuthCredential{
+		AccessToken:  decoded.AccessToken,
+		RefreshToken: decoded.RefreshToken,
+		AccountID:    decoded.AccountID,
+		ExpiresAt:    decoded.ExpiresAt,
+		Provider:     decoded.Provider,
+		AuthMethod:   decoded.AuthMethod,
+		Email:        decoded.Email,
+		ProjectID:    decoded.ProjectID,
+		TenantKey:    decoded.TenantKey,
+		UserID:       decoded.UserID,
+		OpenID:       decoded.OpenID,
+		UnionID:      decoded.UnionID,
+		DisplayName:  decoded.DisplayName,
+	}
+
+	scopeRaw := decoded.Scope
+	if len(scopeRaw) == 0 || string(scopeRaw) == "null" {
+		return nil
+	}
+
+	var scopeList []string
+	if err := json.Unmarshal(scopeRaw, &scopeList); err == nil {
+		c.Scope = compactScope(scopeList)
+		return nil
+	}
+
+	var scopeText string
+	if err := json.Unmarshal(scopeRaw, &scopeText); err == nil {
+		c.Scope = parseScopeString(scopeText)
+		return nil
+	}
+
+	var scopeItems []any
+	if err := json.Unmarshal(scopeRaw, &scopeItems); err == nil {
+		scopeList = make([]string, 0, len(scopeItems))
+		for _, item := range scopeItems {
+			if text := strings.TrimSpace(toString(item)); text != "" {
+				scopeList = append(scopeList, text)
+			}
+		}
+		c.Scope = compactScope(scopeList)
+	}
+
+	return nil
 }
 
 func (c *AuthCredential) IsExpired() bool {
@@ -113,4 +191,43 @@ func DeleteAllCredentials() error {
 		return err
 	}
 	return nil
+}
+
+func parseScopeString(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' '
+	})
+	return compactScope(parts)
+}
+
+func compactScope(scope []string) []string {
+	if len(scope) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(scope))
+	for _, item := range scope {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func toString(v any) string {
+	switch value := v.(type) {
+	case string:
+		return value
+	default:
+		if v == nil {
+			return ""
+		}
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
 }

@@ -6,13 +6,29 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
 )
 
 // ── Config API tests ─────────────────────────────────────────────
+
+type feishuAuthCredential struct {
+	AccessToken  string `json:"access_token"`
+	Provider     string `json:"provider"`
+	AuthMethod   string `json:"auth_method"`
+	DisplayName  string `json:"display_name"`
+	TenantKey    string `json:"tenant_key"`
+	UserID       string `json:"user_id"`
+	OpenID       string `json:"open_id"`
+	UnionID      string `json:"union_id"`
+	Email        string `json:"email"`
+	Scope        string `json:"scope"`
+	RefreshToken string `json:"refresh_token"`
+}
 
 func setupConfigMux(t *testing.T, cfg *config.Config) (*http.ServeMux, string) {
 	t.Helper()
@@ -30,6 +46,12 @@ func setupConfigMux(t *testing.T, cfg *config.Config) (*http.ServeMux, string) {
 	RegisterConfigAPI(mux, path)
 	RegisterAuthAPI(mux, path)
 	return mux, path
+}
+
+func setupAuthHome(t *testing.T) {
+	t.Helper()
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
 }
 
 func TestGetConfig(t *testing.T) {
@@ -127,6 +149,7 @@ func TestPutConfig_InvalidJSON(t *testing.T) {
 // ── Auth API tests ───────────────────────────────────────────────
 
 func TestAuthStatus(t *testing.T) {
+	setupAuthHome(t)
 	cfg := &config.Config{}
 	mux, _ := setupConfigMux(t, cfg)
 
@@ -152,7 +175,70 @@ func TestAuthStatus(t *testing.T) {
 	}
 }
 
+func TestAuthStatus_FeishuProviderNormalized(t *testing.T) {
+	setupAuthHome(t)
+
+	storePath := filepath.Join(os.Getenv("HOME"), ".picoclaw", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(storePath), 0o755); err != nil {
+		t.Fatalf("mkdir auth dir: %v", err)
+	}
+	store := map[string]any{
+		"credentials": map[string]any{
+			"feishu-user": feishuAuthCredential{
+				AccessToken: "token",
+				Provider:    "feishu-user",
+				AuthMethod:  "oauth",
+				DisplayName: "测试用户",
+				TenantKey:   "tenant-1",
+				UserID:      "ou-user",
+				OpenID:      "ou-open",
+				UnionID:     "on-union",
+				Email:       "user@example.com",
+				Scope:       "docs:doc,drive:file",
+			},
+		},
+	}
+	raw, _ := json.Marshal(store)
+	if err := os.WriteFile(storePath, raw, 0o600); err != nil {
+		t.Fatalf("write auth store: %v", err)
+	}
+
+	mux, _ := setupConfigMux(t, &config.Config{})
+	req := httptest.NewRequest("GET", "/api/auth/status", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/auth/status: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Providers []providerStatus `json:"providers"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Providers) != 1 {
+		t.Fatalf("expected 1 provider, got %d", len(resp.Providers))
+	}
+	got := resp.Providers[0]
+	if got.Provider != "feishu" {
+		t.Fatalf("provider = %q, want feishu", got.Provider)
+	}
+
+	credRuntimeType := reflect.TypeOf(auth.AuthCredential{})
+	if _, ok := credRuntimeType.FieldByName("DisplayName"); ok {
+		if got.DisplayName != "测试用户" || got.TenantKey != "tenant-1" || got.UserID != "ou-user" {
+			t.Fatalf("unexpected feishu details: %+v", got)
+		}
+		if got.Scope != "docs:doc,drive:file" {
+			t.Fatalf("scope = %q, want docs:doc,drive:file", got.Scope)
+		}
+	}
+}
+
 func TestAuthLogin_UnsupportedProvider(t *testing.T) {
+	setupAuthHome(t)
 	cfg := &config.Config{}
 	mux, _ := setupConfigMux(t, cfg)
 
@@ -168,6 +254,7 @@ func TestAuthLogin_UnsupportedProvider(t *testing.T) {
 }
 
 func TestAuthLogin_AnthropicNoToken(t *testing.T) {
+	setupAuthHome(t)
 	cfg := &config.Config{}
 	mux, _ := setupConfigMux(t, cfg)
 
@@ -183,6 +270,7 @@ func TestAuthLogin_AnthropicNoToken(t *testing.T) {
 }
 
 func TestAuthLogin_InvalidBody(t *testing.T) {
+	setupAuthHome(t)
 	cfg := &config.Config{}
 	mux, _ := setupConfigMux(t, cfg)
 
@@ -197,6 +285,7 @@ func TestAuthLogin_InvalidBody(t *testing.T) {
 }
 
 func TestAuthLogout_InvalidBody(t *testing.T) {
+	setupAuthHome(t)
 	cfg := &config.Config{}
 	mux, _ := setupConfigMux(t, cfg)
 
@@ -211,6 +300,7 @@ func TestAuthLogout_InvalidBody(t *testing.T) {
 }
 
 func TestOAuthCallback_InvalidState(t *testing.T) {
+	setupAuthHome(t)
 	cfg := &config.Config{}
 	mux, _ := setupConfigMux(t, cfg)
 
@@ -220,6 +310,50 @@ func TestOAuthCallback_InvalidState(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for invalid state, got %d", w.Code)
+	}
+}
+
+func TestAuthLogout_FeishuDeletesFeishuUserCredential(t *testing.T) {
+	setupAuthHome(t)
+
+	storePath := filepath.Join(os.Getenv("HOME"), ".picoclaw", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(storePath), 0o755); err != nil {
+		t.Fatalf("mkdir auth dir: %v", err)
+	}
+	store := map[string]any{
+		"credentials": map[string]any{
+			"feishu-user": feishuAuthCredential{
+				AccessToken: "token",
+				Provider:    "feishu-user",
+				AuthMethod:  "oauth",
+			},
+		},
+	}
+	raw, _ := json.Marshal(store)
+	if err := os.WriteFile(storePath, raw, 0o600); err != nil {
+		t.Fatalf("write auth store: %v", err)
+	}
+
+	mux, _ := setupConfigMux(t, &config.Config{})
+	req := httptest.NewRequest("POST", "/api/auth/logout", strings.NewReader(`{"provider":"feishu"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST /api/auth/logout: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	data, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("read auth store: %v", err)
+	}
+	var got map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("decode auth store: %v", err)
+	}
+	if _, ok := got["credentials"]["feishu-user"]; ok {
+		t.Fatal("expected feishu-user credential to be deleted")
 	}
 }
 

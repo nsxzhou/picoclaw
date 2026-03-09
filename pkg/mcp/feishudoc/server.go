@@ -13,6 +13,7 @@ import (
 	larkdocs "github.com/larksuite/oapi-sdk-go/v3/service/docs/v1"
 	larkdocx "github.com/larksuite/oapi-sdk-go/v3/service/docx/v1"
 	larkdrive "github.com/larksuite/oapi-sdk-go/v3/service/drive/v1"
+	larksearch "github.com/larksuite/oapi-sdk-go/v3/service/search/v2"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -48,6 +49,8 @@ type Server struct {
 	confirmations *confirmationManager
 	audit         *auditLogger
 	now           func() time.Time
+	appID         string
+	appSecret     string
 }
 
 type Options struct {
@@ -194,6 +197,8 @@ func New(opts Options) (*Server, error) {
 		confirmations: newConfirmationManager(ttl),
 		audit:         newAuditLogger(opts.Workspace),
 		now:           time.Now,
+		appID:         strings.TrimSpace(opts.AppID),
+		appSecret:     strings.TrimSpace(opts.AppSecret),
 	}, nil
 }
 
@@ -209,13 +214,13 @@ func (s *Server) Run(ctx context.Context) error {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        toolDocSearch,
-		Description: "在飞书云文档中列出并按名称筛选 docx 文档，返回 doc_token 供后续操作。",
+		Description: "搜索或浏览飞书云文档。query 非空时搜索 docx/doc/sheet/slides/bitable/wiki/mindnote；query 为空时只浏览根空间或文件夹。",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, s.handleDocSearch)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        toolDocRead,
-		Description: "读取飞书 docx 文档内容，支持原始文本、Markdown 导出和块结构摘要。",
+		Description: "读取飞书文档内容。当前仅对 docx 提供完整内容读取；非 docx 返回元信息与能力说明。",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, s.handleDocRead)
 
@@ -239,19 +244,19 @@ func (s *Server) Run(ctx context.Context) error {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        toolDocShare,
-		Description: "更新飞书 docx 文档的公开分享设置。首次调用会返回 action_id，需二次确认后执行。",
+		Description: "更新飞书文档的公开分享设置。首次调用会返回 action_id，需二次确认后执行。",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(true)},
 	}, s.handleDocShare)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        toolDocSetPermission,
-		Description: "管理飞书 docx 成员权限（list/grant/revoke）。grant/revoke 首次调用会返回 action_id，需二次确认后执行。",
+		Description: "管理飞书文档成员权限（list/grant/revoke）。grant/revoke 首次调用会返回 action_id，需二次确认后执行。",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(true)},
 	}, s.handleDocSetPermission)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        toolDocDelete,
-		Description: "删除飞书 docx 文档。首次调用会返回 action_id，需二次确认后执行。",
+		Description: "删除飞书文档。首次调用会返回 action_id，需二次确认后执行。",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(true)},
 	}, s.handleDocDelete)
 
@@ -264,62 +269,159 @@ func (s *Server) handleDocSearch(
 	in docSearchInput,
 ) (*mcp.CallToolResult, any, error) {
 	meta := newInvokeMeta(in.Channel, in.ChatID, in.SenderID)
+	authCtx, err := s.selectAuthContext(meta)
+	if err != nil {
+		s.auditSafe(auditRecord{
+			Tool:               toolDocSearch,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Status:             "error",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
+			Error:              err.Error(),
+		})
+		return errorTextResult(err, authCtx), nil, nil
+	}
 
 	pageSize := clampInt(in.PageSize, defaultSearchPageSize, 1, maxSearchPageSize)
+	query := strings.TrimSpace(in.Query)
+	if query != "" {
+		docFilter := larksearch.NewDocFilterBuilder().DocTypes(supportedSearchTypes).Build()
+		wikiFilter := larksearch.NewWikiFilterBuilder().DocTypes(supportedSearchTypes).Build()
+		searchReq := larksearch.NewSearchDocWikiReqBuilder().
+			Body(larksearch.NewSearchDocWikiReqBodyBuilder().
+				Query(query).
+				DocFilter(docFilter).
+				WikiFilter(wikiFilter).
+				PageSize(pageSize).
+				PageToken(strings.TrimSpace(in.PageToken)).
+				Build()).
+			Build()
+
+		searchResp, searchErr := s.client.Search.V2.DocWiki.Search(ctx, searchReq, authCtx.RequestOptions...)
+		if searchErr != nil {
+			s.auditSafe(auditRecord{
+				Tool:               toolDocSearch,
+				Channel:            meta.Channel,
+				ChatID:             meta.ChatID,
+				SenderID:           meta.SenderID,
+				Status:             "error",
+				AuthMode:           authCtx.Mode,
+				BoundIdentityMatch: authCtx.BoundIdentityMatch,
+				Error:              searchErr.Error(),
+			})
+			return errorTextResult(fmt.Errorf("search docs failed: %w", searchErr), authCtx), nil, nil
+		}
+		if !searchResp.Success() {
+			err := fmt.Errorf("search docs api error: code=%d msg=%s", searchResp.Code, searchResp.Msg)
+			s.auditSafe(auditRecord{
+				Tool:               toolDocSearch,
+				Channel:            meta.Channel,
+				ChatID:             meta.ChatID,
+				SenderID:           meta.SenderID,
+				Status:             "error",
+				AuthMode:           authCtx.Mode,
+				BoundIdentityMatch: authCtx.BoundIdentityMatch,
+				Error:              err.Error(),
+			})
+			return errorTextResult(err, authCtx), nil, nil
+		}
+
+		items := make([]map[string]any, 0)
+		if searchResp.Data != nil {
+			for _, item := range searchResp.Data.ResUnits {
+				if mapped := docSearchResultToMap(item); len(mapped) > 0 {
+					items = append(items, mapped)
+				}
+			}
+		}
+		sort.Slice(items, func(i, j int) bool {
+			left := strings.ToLower(strMap(items[i], "name"))
+			right := strings.ToLower(strMap(items[j], "name"))
+			if left == right {
+				return strMap(items[i], "token") < strMap(items[j], "token")
+			}
+			return left < right
+		})
+
+		hasMore := false
+		nextPageToken := ""
+		if searchResp.Data != nil {
+			hasMore = boolVal(searchResp.Data.HasMore)
+			nextPageToken = strVal(searchResp.Data.PageToken)
+		}
+		result := attachCommonResultFields(map[string]any{
+			"query":           query,
+			"search_mode":     "search",
+			"returned_count":  len(items),
+			"items":           items,
+			"has_more":        hasMore,
+			"next_page_token": nextPageToken,
+		}, authCtx)
+		s.auditSafe(auditRecord{
+			Tool:               toolDocSearch,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Status:             "success",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
+			Details:            map[string]any{"query": query, "search_mode": "search", "returned_count": len(items)},
+		})
+		return textResult(result), nil, nil
+	}
+
 	req := larkdrive.NewListFileReqBuilder().PageSize(pageSize)
 	if strings.TrimSpace(in.PageToken) != "" {
 		req.PageToken(strings.TrimSpace(in.PageToken))
 	}
+	searchMode := "browse_root"
 	if strings.TrimSpace(in.Folder) != "" {
 		req.FolderToken(strings.TrimSpace(in.Folder))
+		searchMode = "browse_folder"
 	}
 
-	resp, err := s.client.Drive.V1.File.List(ctx, req.Build())
+	resp, err := s.client.Drive.V1.File.List(ctx, req.Build(), authCtx.RequestOptions...)
 	if err != nil {
 		s.auditSafe(auditRecord{
-			Tool:     toolDocSearch,
-			Channel:  meta.Channel,
-			ChatID:   meta.ChatID,
-			SenderID: meta.SenderID,
-			Status:   "error",
-			Error:    err.Error(),
+			Tool:               toolDocSearch,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Status:             "error",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
+			Error:              err.Error(),
 		})
-		return errorResult(fmt.Errorf("list docs failed: %w", err)), nil, nil
+		return errorTextResult(fmt.Errorf("browse docs failed: %w", err), authCtx), nil, nil
 	}
 	if !resp.Success() {
-		err := fmt.Errorf("list docs api error: code=%d msg=%s", resp.Code, resp.Msg)
+		err := fmt.Errorf("browse docs api error: code=%d msg=%s", resp.Code, resp.Msg)
 		s.auditSafe(auditRecord{
-			Tool:     toolDocSearch,
-			Channel:  meta.Channel,
-			ChatID:   meta.ChatID,
-			SenderID: meta.SenderID,
-			Status:   "error",
-			Error:    err.Error(),
+			Tool:               toolDocSearch,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Status:             "error",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
+			Error:              err.Error(),
 		})
-		return errorResult(err), nil, nil
+		return errorTextResult(err, authCtx), nil, nil
 	}
 
-	query := strings.TrimSpace(strings.ToLower(in.Query))
 	items := make([]map[string]any, 0)
 	for _, f := range safeDriveFiles(resp.Data) {
-		fileType := strings.ToLower(strVal(f.Type))
-		if fileType != feishuDocType {
-			continue
-		}
 		name := strVal(f.Name)
 		token := strVal(f.Token)
-		if query != "" {
-			nameLower := strings.ToLower(name)
-			tokenLower := strings.ToLower(token)
-			if !strings.Contains(nameLower, query) && !strings.Contains(tokenLower, query) {
-				continue
-			}
-		}
 
 		items = append(items, map[string]any{
 			"doc_token":     token,
+			"token":         token,
 			"name":          name,
-			"type":          fileType,
+			"title":         name,
+			"type":          strings.ToLower(strVal(f.Type)),
 			"url":           strVal(f.Url),
 			"parent_token":  strVal(f.ParentToken),
 			"owner_id":      strVal(f.OwnerId),
@@ -337,22 +439,24 @@ func (s *Server) handleDocSearch(
 		return left < right
 	})
 
-	result := map[string]any{
-		"query":           in.Query,
-		"search_mode":     "list_filter",
+	result := attachCommonResultFields(map[string]any{
+		"query":           "",
+		"search_mode":     searchMode,
 		"returned_count":  len(items),
 		"items":           items,
 		"has_more":        boolVal(resp.Data.HasMore),
 		"next_page_token": strVal(resp.Data.NextPageToken),
-	}
+	}, authCtx)
 
 	s.auditSafe(auditRecord{
-		Tool:     toolDocSearch,
-		Channel:  meta.Channel,
-		ChatID:   meta.ChatID,
-		SenderID: meta.SenderID,
-		Status:   "success",
-		Details:  map[string]any{"query": in.Query, "returned_count": len(items)},
+		Tool:               toolDocSearch,
+		Channel:            meta.Channel,
+		ChatID:             meta.ChatID,
+		SenderID:           meta.SenderID,
+		Status:             "success",
+		AuthMode:           authCtx.Mode,
+		BoundIdentityMatch: authCtx.BoundIdentityMatch,
+		Details:            map[string]any{"query": "", "search_mode": searchMode, "returned_count": len(items)},
 	})
 
 	return textResult(result), nil, nil
@@ -364,30 +468,88 @@ func (s *Server) handleDocRead(
 	in docReadInput,
 ) (*mcp.CallToolResult, any, error) {
 	meta := newInvokeMeta(in.Channel, in.ChatID, in.SenderID)
-	docToken := normalizeDocToken(in.DocToken)
+	authCtx, err := s.selectAuthContext(meta)
+	if err != nil {
+		s.auditSafe(auditRecord{
+			Tool:               toolDocRead,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Status:             "error",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
+			Error:              err.Error(),
+		})
+		return errorTextResult(err, authCtx), nil, nil
+	}
+
+	docToken := normalizeFileToken(in.DocToken)
 	if docToken == "" {
-		return errorResult(errors.New("doc_token is required")), nil, nil
+		return errorTextResult(errors.New("doc_token is required"), authCtx), nil, nil
+	}
+
+	metaInfo, metaErr := s.resolveFileMeta(ctx, docToken, authCtx)
+	if metaErr != nil {
+		s.auditSafe(auditRecord{
+			Tool:               toolDocRead,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Target:             docToken,
+			Status:             "error",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
+			Error:              metaErr.Error(),
+		})
+		return errorTextResult(metaErr, authCtx), nil, nil
+	}
+
+	if metaInfo.Type != feishuDocType {
+		out := attachCommonResultFields(map[string]any{
+			"doc_token":      metaInfo.Token,
+			"token":          metaInfo.Token,
+			"title":          metaInfo.Title,
+			"type":           metaInfo.Type,
+			"url":            metaInfo.URL,
+			"owner_id":       metaInfo.OwnerID,
+			"created_time":   metaInfo.CreateTime,
+			"modified_time":  metaInfo.LatestModifyTime,
+			"content_status": "metadata_only",
+			"message":        "当前仅对 docx 提供完整内容读取，其他类型先返回元信息与能力说明。",
+		}, authCtx)
+		s.auditSafe(auditRecord{
+			Tool:               toolDocRead,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Target:             metaInfo.Token,
+			Status:             "success",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
+			Details:            map[string]any{"type": metaInfo.Type, "content_status": "metadata_only"},
+		})
+		return textResult(out), nil, nil
 	}
 
 	metaResp, err := s.client.Docx.V1.Document.Get(ctx, larkdocx.NewGetDocumentReqBuilder().
 		DocumentId(docToken).
-		Build())
+		Build(), authCtx.RequestOptions...)
 	if err != nil {
-		return errorResult(fmt.Errorf("get document failed: %w", err)), nil, nil
+		return errorTextResult(fmt.Errorf("get document failed: %w", err), authCtx), nil, nil
 	}
 	if !metaResp.Success() {
-		return errorResult(fmt.Errorf("get document api error: code=%d msg=%s", metaResp.Code, metaResp.Msg)), nil, nil
+		return errorTextResult(fmt.Errorf("get document api error: code=%d msg=%s", metaResp.Code, metaResp.Msg), authCtx), nil, nil
 	}
 
 	rawResp, err := s.client.Docx.V1.Document.RawContent(ctx, larkdocx.NewRawContentDocumentReqBuilder().
 		DocumentId(docToken).
 		Lang(larkdocx.LangZH).
-		Build())
+		Build(), authCtx.RequestOptions...)
 	if err != nil {
-		return errorResult(fmt.Errorf("get raw content failed: %w", err)), nil, nil
+		return errorTextResult(fmt.Errorf("get raw content failed: %w", err), authCtx), nil, nil
 	}
 	if !rawResp.Success() {
-		return errorResult(fmt.Errorf("raw content api error: code=%d msg=%s", rawResp.Code, rawResp.Msg)), nil, nil
+		return errorTextResult(fmt.Errorf("raw content api error: code=%d msg=%s", rawResp.Code, rawResp.Msg), authCtx), nil, nil
 	}
 
 	maxContent := clampInt(in.MaxContentChar, defaultMaxReadContentLen, 256, maxReadContentLen)
@@ -407,7 +569,7 @@ func (s *Server) handleDocRead(
 			DocType(feishuDocType).
 			ContentType(larkdocx.ContentTypeMarkdown).
 			Lang("zh").
-			Build())
+			Build(), authCtx.RequestOptions...)
 		if mdErr != nil {
 			mdError = mdErr.Error()
 		} else if !mdResp.Success() {
@@ -417,13 +579,16 @@ func (s *Server) handleDocRead(
 		}
 	}
 
-	out := map[string]any{
+	out := attachCommonResultFields(map[string]any{
 		"doc_token":             docToken,
+		"token":                 docToken,
 		"title":                 strVal(metaResp.Data.Document.Title),
+		"type":                  feishuDocType,
+		"url":                   metaInfo.URL,
 		"revision_id":           intVal(metaResp.Data.Document.RevisionId),
 		"raw_content":           rawContent,
 		"raw_content_truncated": rawTruncated,
-	}
+	}, authCtx)
 
 	if includeMarkdown {
 		out["markdown_content"] = markdownContent
@@ -435,7 +600,7 @@ func (s *Server) handleDocRead(
 
 	if in.IncludeBlocks {
 		pageSize := clampInt(in.PageSize, defaultReadPageSize, 1, maxReadPageSize)
-		blockItems, hasMore, nextPageToken, blockErr := s.listBlockSummaries(ctx, docToken, pageSize)
+		blockItems, hasMore, nextPageToken, blockErr := s.listBlockSummaries(ctx, docToken, pageSize, authCtx)
 		if blockErr != nil {
 			out["blocks_error"] = blockErr.Error()
 		} else {
@@ -446,13 +611,15 @@ func (s *Server) handleDocRead(
 	}
 
 	s.auditSafe(auditRecord{
-		Tool:     toolDocRead,
-		Channel:  meta.Channel,
-		ChatID:   meta.ChatID,
-		SenderID: meta.SenderID,
-		Target:   docToken,
-		Status:   "success",
-		Details:  map[string]any{"include_blocks": in.IncludeBlocks},
+		Tool:               toolDocRead,
+		Channel:            meta.Channel,
+		ChatID:             meta.ChatID,
+		SenderID:           meta.SenderID,
+		Target:             docToken,
+		Status:             "success",
+		AuthMode:           authCtx.Mode,
+		BoundIdentityMatch: authCtx.BoundIdentityMatch,
+		Details:            map[string]any{"include_blocks": in.IncludeBlocks, "type": feishuDocType},
 	})
 
 	return textResult(out), nil, nil
@@ -465,15 +632,29 @@ func (s *Server) handleDocCreate(
 ) (*mcp.CallToolResult, any, error) {
 	title := strings.TrimSpace(in.Title)
 	if title == "" {
-		return errorResult(errors.New("title is required")), nil, nil
+		return errorTextResult(errors.New("title is required"), nil), nil, nil
 	}
 
 	contentType, err := normalizeContentType(in.ContentType)
 	if err != nil {
-		return errorResult(err), nil, nil
+		return errorTextResult(err, nil), nil, nil
 	}
 
 	meta := newInvokeMeta(in.Channel, in.ChatID, in.SenderID)
+	authCtx, err := s.selectAuthContext(meta)
+	if err != nil {
+		s.auditSafe(auditRecord{
+			Tool:               toolDocCreate,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Status:             "error",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
+			Error:              err.Error(),
+		})
+		return errorTextResult(err, authCtx), nil, nil
+	}
 	payload := map[string]any{
 		"title":        title,
 		"folder_token": strings.TrimSpace(in.FolderToken),
@@ -489,6 +670,7 @@ func (s *Server) handleDocCreate(
 	action, pendingResult := s.prepareWriteAction(
 		toolDocCreate,
 		meta,
+		authCtx,
 		in.ActionID,
 		in.Confirmation,
 		payload,
@@ -505,14 +687,15 @@ func (s *Server) handleDocCreate(
 	}
 	createResp, createErr := s.client.Docx.V1.Document.Create(ctx, larkdocx.NewCreateDocumentReqBuilder().
 		Body(createReqBody.Build()).
-		Build())
+		Build(), authCtx.RequestOptions...)
 	if createErr != nil {
-		return s.writeErrorWithAudit(toolDocCreate, meta, action, createErr), nil, nil
+		return s.writeErrorWithAudit(toolDocCreate, meta, authCtx, action, createErr), nil, nil
 	}
 	if !createResp.Success() {
 		return s.writeErrorWithAudit(
 			toolDocCreate,
 			meta,
+			authCtx,
 			action,
 			fmt.Errorf("create doc api error: code=%d msg=%s", createResp.Code, createResp.Msg),
 		), nil, nil
@@ -521,12 +704,12 @@ func (s *Server) handleDocCreate(
 	docToken := strVal(createResp.Data.Document.DocumentId)
 	if docToken == "" {
 		err := errors.New("empty doc token returned by create api")
-		return s.writeErrorWithAudit(toolDocCreate, meta, action, err), nil, nil
+		return s.writeErrorWithAudit(toolDocCreate, meta, authCtx, action, err), nil, nil
 	}
 
 	if strings.TrimSpace(in.Content) != "" {
-		if replaceErr := s.replaceDocumentContent(ctx, docToken, in.Content, contentType); replaceErr != nil {
-			return s.writeErrorWithAudit(toolDocCreate, meta, action, replaceErr), nil, nil
+		if replaceErr := s.replaceDocumentContent(ctx, docToken, in.Content, contentType, authCtx); replaceErr != nil {
+			return s.writeErrorWithAudit(toolDocCreate, meta, authCtx, action, replaceErr), nil, nil
 		}
 	}
 
@@ -534,22 +717,26 @@ func (s *Server) handleDocCreate(
 		s.confirmations.Consume(action.ID)
 	}
 
-	result := map[string]any{
+	result := attachCommonResultFields(map[string]any{
 		"status":      "ok",
 		"doc_token":   docToken,
+		"token":       docToken,
+		"type":        feishuDocType,
 		"title":       title,
 		"doc_url":     fmt.Sprintf("https://feishu.cn/docx/%s", docToken),
 		"action_id":   actionIDOrEmpty(action),
 		"content_set": strings.TrimSpace(in.Content) != "",
-	}
+	}, authCtx)
 	s.auditSafe(auditRecord{
-		Tool:     toolDocCreate,
-		ActionID: actionIDOrEmpty(action),
-		Channel:  meta.Channel,
-		ChatID:   meta.ChatID,
-		SenderID: meta.SenderID,
-		Target:   docToken,
-		Status:   "success",
+		Tool:               toolDocCreate,
+		ActionID:           actionIDOrEmpty(action),
+		Channel:            meta.Channel,
+		ChatID:             meta.ChatID,
+		SenderID:           meta.SenderID,
+		Target:             docToken,
+		Status:             "success",
+		AuthMode:           authCtx.Mode,
+		BoundIdentityMatch: authCtx.BoundIdentityMatch,
 		Details: map[string]any{
 			"title":       title,
 			"content_set": strings.TrimSpace(in.Content) != "",
@@ -566,15 +753,15 @@ func (s *Server) handleDocUpdate(
 ) (*mcp.CallToolResult, any, error) {
 	docToken := normalizeDocToken(in.DocToken)
 	if docToken == "" {
-		return errorResult(errors.New("doc_token is required")), nil, nil
+		return errorTextResult(errors.New("doc_token is required"), nil), nil, nil
 	}
 	if strings.TrimSpace(in.Content) == "" {
-		return errorResult(errors.New("content is required")), nil, nil
+		return errorTextResult(errors.New("content is required"), nil), nil, nil
 	}
 
 	contentType, err := normalizeContentType(in.ContentType)
 	if err != nil {
-		return errorResult(err), nil, nil
+		return errorTextResult(err, nil), nil, nil
 	}
 
 	strategy := strings.ToLower(strings.TrimSpace(in.Strategy))
@@ -582,10 +769,25 @@ func (s *Server) handleDocUpdate(
 		strategy = "replace"
 	}
 	if strategy != "replace" && strategy != "append" {
-		return errorResult(errors.New("strategy must be one of: replace, append")), nil, nil
+		return errorTextResult(errors.New("strategy must be one of: replace, append"), nil), nil, nil
 	}
 
 	meta := newInvokeMeta(in.Channel, in.ChatID, in.SenderID)
+	authCtx, err := s.selectAuthContext(meta)
+	if err != nil {
+		s.auditSafe(auditRecord{
+			Tool:               toolDocUpdate,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Target:             docToken,
+			Status:             "error",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
+			Error:              err.Error(),
+		})
+		return errorTextResult(err, authCtx), nil, nil
+	}
 	payload := map[string]any{
 		"doc_token":    docToken,
 		"content":      in.Content,
@@ -596,6 +798,7 @@ func (s *Server) handleDocUpdate(
 	action, pendingResult := s.prepareWriteAction(
 		toolDocUpdate,
 		meta,
+		authCtx,
 		in.ActionID,
 		in.Confirmation,
 		payload,
@@ -607,33 +810,37 @@ func (s *Server) handleDocUpdate(
 	}
 
 	if strategy == "replace" {
-		err = s.replaceDocumentContent(ctx, docToken, in.Content, contentType)
+		err = s.replaceDocumentContent(ctx, docToken, in.Content, contentType, authCtx)
 	} else {
-		err = s.appendDocumentContent(ctx, docToken, in.Content, contentType)
+		err = s.appendDocumentContent(ctx, docToken, in.Content, contentType, authCtx)
 	}
 	if err != nil {
-		return s.writeErrorWithAudit(toolDocUpdate, meta, action, err), nil, nil
+		return s.writeErrorWithAudit(toolDocUpdate, meta, authCtx, action, err), nil, nil
 	}
 
 	if action != nil {
 		s.confirmations.Consume(action.ID)
 	}
 
-	result := map[string]any{
+	result := attachCommonResultFields(map[string]any{
 		"status":      "ok",
 		"doc_token":   docToken,
+		"token":       docToken,
+		"type":        feishuDocType,
 		"strategy":    strategy,
 		"action_id":   actionIDOrEmpty(action),
 		"content_len": len(in.Content),
-	}
+	}, authCtx)
 	s.auditSafe(auditRecord{
-		Tool:     toolDocUpdate,
-		ActionID: actionIDOrEmpty(action),
-		Channel:  meta.Channel,
-		ChatID:   meta.ChatID,
-		SenderID: meta.SenderID,
-		Target:   docToken,
-		Status:   "success",
+		Tool:               toolDocUpdate,
+		ActionID:           actionIDOrEmpty(action),
+		Channel:            meta.Channel,
+		ChatID:             meta.ChatID,
+		SenderID:           meta.SenderID,
+		Target:             docToken,
+		Status:             "success",
+		AuthMode:           authCtx.Mode,
+		BoundIdentityMatch: authCtx.BoundIdentityMatch,
 		Details: map[string]any{
 			"strategy":    strategy,
 			"content_len": len(in.Content),
@@ -650,14 +857,29 @@ func (s *Server) handleDocComment(
 ) (*mcp.CallToolResult, any, error) {
 	docToken := normalizeDocToken(in.DocToken)
 	if docToken == "" {
-		return errorResult(errors.New("doc_token is required")), nil, nil
+		return errorTextResult(errors.New("doc_token is required"), nil), nil, nil
 	}
 	comment := strings.TrimSpace(in.Comment)
 	if comment == "" {
-		return errorResult(errors.New("comment is required")), nil, nil
+		return errorTextResult(errors.New("comment is required"), nil), nil, nil
 	}
 
 	meta := newInvokeMeta(in.Channel, in.ChatID, in.SenderID)
+	authCtx, err := s.selectAuthContext(meta)
+	if err != nil {
+		s.auditSafe(auditRecord{
+			Tool:               toolDocComment,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Target:             docToken,
+			Status:             "error",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
+			Error:              err.Error(),
+		})
+		return errorTextResult(err, authCtx), nil, nil
+	}
 	payload := map[string]any{
 		"doc_token":  docToken,
 		"comment":    comment,
@@ -667,6 +889,7 @@ func (s *Server) handleDocComment(
 	action, pendingResult := s.prepareWriteAction(
 		toolDocComment,
 		meta,
+		authCtx,
 		in.ActionID,
 		in.Confirmation,
 		payload,
@@ -695,14 +918,15 @@ func (s *Server) handleDocComment(
 		FileToken(docToken).
 		FileType(feishuDocType).
 		FileComment(commentBuilder.Build()).
-		Build())
+		Build(), authCtx.RequestOptions...)
 	if commentErr != nil {
-		return s.writeErrorWithAudit(toolDocComment, meta, action, commentErr), nil, nil
+		return s.writeErrorWithAudit(toolDocComment, meta, authCtx, action, commentErr), nil, nil
 	}
 	if !commentResp.Success() {
 		return s.writeErrorWithAudit(
 			toolDocComment,
 			meta,
+			authCtx,
 			action,
 			fmt.Errorf("create comment api error: code=%d msg=%s", commentResp.Code, commentResp.Msg),
 		), nil, nil
@@ -712,22 +936,26 @@ func (s *Server) handleDocComment(
 		s.confirmations.Consume(action.ID)
 	}
 
-	result := map[string]any{
+	result := attachCommonResultFields(map[string]any{
 		"status":      "ok",
 		"doc_token":   docToken,
+		"token":       docToken,
+		"type":        feishuDocType,
 		"comment_id":  strVal(commentResp.Data.CommentId),
 		"is_whole":    boolVal(commentResp.Data.IsWhole),
 		"action_id":   actionIDOrEmpty(action),
 		"create_time": intVal(commentResp.Data.CreateTime),
-	}
+	}, authCtx)
 	s.auditSafe(auditRecord{
-		Tool:     toolDocComment,
-		ActionID: actionIDOrEmpty(action),
-		Channel:  meta.Channel,
-		ChatID:   meta.ChatID,
-		SenderID: meta.SenderID,
-		Target:   docToken,
-		Status:   "success",
+		Tool:               toolDocComment,
+		ActionID:           actionIDOrEmpty(action),
+		Channel:            meta.Channel,
+		ChatID:             meta.ChatID,
+		SenderID:           meta.SenderID,
+		Target:             docToken,
+		Status:             "success",
+		AuthMode:           authCtx.Mode,
+		BoundIdentityMatch: authCtx.BoundIdentityMatch,
 		Details: map[string]any{
 			"comment_id": strVal(commentResp.Data.CommentId),
 			"is_reply":   strings.TrimSpace(in.CommentID) != "",
@@ -741,9 +969,9 @@ func (s *Server) handleDocShare(
 	_ *mcp.CallToolRequest,
 	in docShareInput,
 ) (*mcp.CallToolResult, any, error) {
-	docToken := normalizeDocToken(in.DocToken)
+	docToken := normalizeFileToken(in.DocToken)
 	if docToken == "" {
-		return errorResult(errors.New("doc_token is required")), nil, nil
+		return errorTextResult(errors.New("doc_token is required"), nil), nil, nil
 	}
 
 	reqBody := &larkdrive.PermissionPublicRequest{}
@@ -779,13 +1007,33 @@ func (s *Server) handleDocShare(
 	}
 
 	if len(changed) == 0 {
-		return errorResult(errors.New("at least one share setting must be provided")), nil, nil
+		return errorTextResult(errors.New("at least one share setting must be provided"), nil), nil, nil
 	}
 
 	meta := newInvokeMeta(in.Channel, in.ChatID, in.SenderID)
+	authCtx, err := s.selectAuthContext(meta)
+	if err != nil {
+		s.auditSafe(auditRecord{
+			Tool:               toolDocShare,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Target:             docToken,
+			Status:             "error",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
+			Error:              err.Error(),
+		})
+		return errorTextResult(err, authCtx), nil, nil
+	}
+	metaInfo, metaErr := s.resolveFileMeta(ctx, docToken, authCtx)
+	if metaErr != nil {
+		return errorTextResult(metaErr, authCtx), nil, nil
+	}
 	action, pendingResult := s.prepareWriteAction(
 		toolDocShare,
 		meta,
+		authCtx,
 		in.ActionID,
 		in.Confirmation,
 		map[string]any{
@@ -801,16 +1049,17 @@ func (s *Server) handleDocShare(
 
 	shareResp, shareErr := s.client.Drive.V1.PermissionPublic.Patch(ctx, larkdrive.NewPatchPermissionPublicReqBuilder().
 		Token(docToken).
-		Type(feishuDocType).
+		Type(metaInfo.Type).
 		PermissionPublicRequest(reqBody).
-		Build())
+		Build(), authCtx.RequestOptions...)
 	if shareErr != nil {
-		return s.writeErrorWithAudit(toolDocShare, meta, action, shareErr), nil, nil
+		return s.writeErrorWithAudit(toolDocShare, meta, authCtx, action, shareErr), nil, nil
 	}
 	if !shareResp.Success() {
 		return s.writeErrorWithAudit(
 			toolDocShare,
 			meta,
+			authCtx,
 			action,
 			fmt.Errorf("share api error: code=%d msg=%s", shareResp.Code, shareResp.Msg),
 		), nil, nil
@@ -820,22 +1069,26 @@ func (s *Server) handleDocShare(
 		s.confirmations.Consume(action.ID)
 	}
 
-	result := map[string]any{
+	result := attachCommonResultFields(map[string]any{
 		"status":            "ok",
 		"doc_token":         docToken,
+		"token":             docToken,
+		"type":              metaInfo.Type,
 		"action_id":         actionIDOrEmpty(action),
 		"applied_changes":   changed,
 		"permission_public": permissionPublicMap(shareResp.Data.PermissionPublic),
-	}
+	}, authCtx)
 	s.auditSafe(auditRecord{
-		Tool:     toolDocShare,
-		ActionID: actionIDOrEmpty(action),
-		Channel:  meta.Channel,
-		ChatID:   meta.ChatID,
-		SenderID: meta.SenderID,
-		Target:   docToken,
-		Status:   "success",
-		Details:  changed,
+		Tool:               toolDocShare,
+		ActionID:           actionIDOrEmpty(action),
+		Channel:            meta.Channel,
+		ChatID:             meta.ChatID,
+		SenderID:           meta.SenderID,
+		Target:             docToken,
+		Status:             "success",
+		AuthMode:           authCtx.Mode,
+		BoundIdentityMatch: authCtx.BoundIdentityMatch,
+		Details:            changed,
 	})
 
 	return textResult(result), nil, nil
@@ -846,17 +1099,36 @@ func (s *Server) handleDocSetPermission(
 	_ *mcp.CallToolRequest,
 	in docSetPermissionInput,
 ) (*mcp.CallToolResult, any, error) {
-	docToken := normalizeDocToken(in.DocToken)
+	docToken := normalizeFileToken(in.DocToken)
 	if docToken == "" {
-		return errorResult(errors.New("doc_token is required")), nil, nil
+		return errorTextResult(errors.New("doc_token is required"), nil), nil, nil
 	}
 
 	operation := strings.ToLower(strings.TrimSpace(in.Operation))
 	if operation == "" {
-		return errorResult(errors.New("operation is required: list, grant, revoke")), nil, nil
+		return errorTextResult(errors.New("operation is required: list, grant, revoke"), nil), nil, nil
 	}
 
 	meta := newInvokeMeta(in.Channel, in.ChatID, in.SenderID)
+	authCtx, err := s.selectAuthContext(meta)
+	if err != nil {
+		s.auditSafe(auditRecord{
+			Tool:               toolDocSetPermission,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Target:             docToken,
+			Status:             "error",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
+			Error:              err.Error(),
+		})
+		return errorTextResult(err, authCtx), nil, nil
+	}
+	metaInfo, metaErr := s.resolveFileMeta(ctx, docToken, authCtx)
+	if metaErr != nil {
+		return errorTextResult(metaErr, authCtx), nil, nil
+	}
 	memberType := trimDefault(strings.ToLower(strings.TrimSpace(in.MemberType)), "openid")
 	collaboratorType := trimDefault(strings.ToLower(strings.TrimSpace(in.CollaboratorType)), "user")
 	perm := trimDefault(strings.ToLower(strings.TrimSpace(in.Perm)), "view")
@@ -866,18 +1138,18 @@ func (s *Server) handleDocSetPermission(
 	case "list":
 		listBuilder := larkdrive.NewListPermissionMemberReqBuilder().
 			Token(docToken).
-			Type(feishuDocType).
+			Type(metaInfo.Type).
 			Fields("*")
 		if permType != "" {
 			listBuilder.PermType(permType)
 		}
 
-		resp, err := s.client.Drive.V1.PermissionMember.List(ctx, listBuilder.Build())
+		resp, err := s.client.Drive.V1.PermissionMember.List(ctx, listBuilder.Build(), authCtx.RequestOptions...)
 		if err != nil {
-			return errorResult(fmt.Errorf("list permissions failed: %w", err)), nil, nil
+			return errorTextResult(fmt.Errorf("list permissions failed: %w", err), authCtx), nil, nil
 		}
 		if !resp.Success() {
-			return errorResult(fmt.Errorf("list permissions api error: code=%d msg=%s", resp.Code, resp.Msg)), nil, nil
+			return errorTextResult(fmt.Errorf("list permissions api error: code=%d msg=%s", resp.Code, resp.Msg), authCtx), nil, nil
 		}
 
 		items := make([]map[string]any, 0, len(resp.Data.Items))
@@ -898,27 +1170,31 @@ func (s *Server) handleDocSetPermission(
 			return left < right
 		})
 
-		result := map[string]any{
+		result := attachCommonResultFields(map[string]any{
 			"status":      "ok",
 			"operation":   operation,
 			"doc_token":   docToken,
+			"token":       docToken,
+			"type":        metaInfo.Type,
 			"items":       items,
 			"items_count": len(items),
-		}
+		}, authCtx)
 		s.auditSafe(auditRecord{
-			Tool:     toolDocSetPermission,
-			Channel:  meta.Channel,
-			ChatID:   meta.ChatID,
-			SenderID: meta.SenderID,
-			Target:   docToken,
-			Status:   "success",
-			Details:  map[string]any{"operation": operation, "items_count": len(items)},
+			Tool:               toolDocSetPermission,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Target:             docToken,
+			Status:             "success",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
+			Details:            map[string]any{"operation": operation, "items_count": len(items), "type": metaInfo.Type},
 		})
 		return textResult(result), nil, nil
 	case "grant":
 		memberID := strings.TrimSpace(in.MemberID)
 		if memberID == "" {
-			return errorResult(errors.New("member_id is required for grant operation")), nil, nil
+			return errorTextResult(errors.New("member_id is required for grant operation"), authCtx), nil, nil
 		}
 
 		payload := map[string]any{
@@ -934,6 +1210,7 @@ func (s *Server) handleDocSetPermission(
 		action, pendingResult := s.prepareWriteAction(
 			toolDocSetPermission,
 			meta,
+			authCtx,
 			in.ActionID,
 			in.Confirmation,
 			payload,
@@ -954,20 +1231,21 @@ func (s *Server) handleDocSetPermission(
 
 		builder := larkdrive.NewCreatePermissionMemberReqBuilder().
 			Token(docToken).
-			Type(feishuDocType).
+			Type(metaInfo.Type).
 			BaseMember(member)
 		if in.NeedNotification != nil {
 			builder.NeedNotification(*in.NeedNotification)
 		}
 
-		resp, err := s.client.Drive.V1.PermissionMember.Create(ctx, builder.Build())
+		resp, err := s.client.Drive.V1.PermissionMember.Create(ctx, builder.Build(), authCtx.RequestOptions...)
 		if err != nil {
-			return s.writeErrorWithAudit(toolDocSetPermission, meta, action, err), nil, nil
+			return s.writeErrorWithAudit(toolDocSetPermission, meta, authCtx, action, err), nil, nil
 		}
 		if !resp.Success() {
 			return s.writeErrorWithAudit(
 				toolDocSetPermission,
 				meta,
+				authCtx,
 				action,
 				fmt.Errorf("grant permission api error: code=%d msg=%s", resp.Code, resp.Msg),
 			), nil, nil
@@ -977,36 +1255,41 @@ func (s *Server) handleDocSetPermission(
 			s.confirmations.Consume(action.ID)
 		}
 
-		result := map[string]any{
+		result := attachCommonResultFields(map[string]any{
 			"status":      "ok",
 			"operation":   operation,
 			"doc_token":   docToken,
+			"token":       docToken,
+			"type":        metaInfo.Type,
 			"action_id":   actionIDOrEmpty(action),
 			"member_id":   memberID,
 			"member_type": memberType,
 			"perm":        perm,
 			"perm_type":   permType,
-		}
+		}, authCtx)
 		s.auditSafe(auditRecord{
-			Tool:     toolDocSetPermission,
-			ActionID: actionIDOrEmpty(action),
-			Channel:  meta.Channel,
-			ChatID:   meta.ChatID,
-			SenderID: meta.SenderID,
-			Target:   docToken,
-			Status:   "success",
+			Tool:               toolDocSetPermission,
+			ActionID:           actionIDOrEmpty(action),
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Target:             docToken,
+			Status:             "success",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
 			Details: map[string]any{
 				"operation": operation,
 				"member_id": memberID,
 				"perm":      perm,
 				"perm_type": permType,
+				"type":      metaInfo.Type,
 			},
 		})
 		return textResult(result), nil, nil
 	case "revoke":
 		memberID := strings.TrimSpace(in.MemberID)
 		if memberID == "" {
-			return errorResult(errors.New("member_id is required for revoke operation")), nil, nil
+			return errorTextResult(errors.New("member_id is required for revoke operation"), authCtx), nil, nil
 		}
 
 		payload := map[string]any{
@@ -1020,6 +1303,7 @@ func (s *Server) handleDocSetPermission(
 		action, pendingResult := s.prepareWriteAction(
 			toolDocSetPermission,
 			meta,
+			authCtx,
 			in.ActionID,
 			in.Confirmation,
 			payload,
@@ -1036,18 +1320,19 @@ func (s *Server) handleDocSetPermission(
 			Build()
 		resp, err := s.client.Drive.V1.PermissionMember.Delete(ctx, larkdrive.NewDeletePermissionMemberReqBuilder().
 			Token(docToken).
-			Type(feishuDocType).
+			Type(metaInfo.Type).
 			MemberId(memberID).
 			MemberType(memberType).
 			Body(body).
-			Build())
+			Build(), authCtx.RequestOptions...)
 		if err != nil {
-			return s.writeErrorWithAudit(toolDocSetPermission, meta, action, err), nil, nil
+			return s.writeErrorWithAudit(toolDocSetPermission, meta, authCtx, action, err), nil, nil
 		}
 		if !resp.Success() {
 			return s.writeErrorWithAudit(
 				toolDocSetPermission,
 				meta,
+				authCtx,
 				action,
 				fmt.Errorf("revoke permission api error: code=%d msg=%s", resp.Code, resp.Msg),
 			), nil, nil
@@ -1057,30 +1342,35 @@ func (s *Server) handleDocSetPermission(
 			s.confirmations.Consume(action.ID)
 		}
 
-		result := map[string]any{
+		result := attachCommonResultFields(map[string]any{
 			"status":      "ok",
 			"operation":   operation,
 			"doc_token":   docToken,
+			"token":       docToken,
+			"type":        metaInfo.Type,
 			"action_id":   actionIDOrEmpty(action),
 			"member_id":   memberID,
 			"member_type": memberType,
-		}
+		}, authCtx)
 		s.auditSafe(auditRecord{
-			Tool:     toolDocSetPermission,
-			ActionID: actionIDOrEmpty(action),
-			Channel:  meta.Channel,
-			ChatID:   meta.ChatID,
-			SenderID: meta.SenderID,
-			Target:   docToken,
-			Status:   "success",
+			Tool:               toolDocSetPermission,
+			ActionID:           actionIDOrEmpty(action),
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Target:             docToken,
+			Status:             "success",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
 			Details: map[string]any{
 				"operation": operation,
 				"member_id": memberID,
+				"type":      metaInfo.Type,
 			},
 		})
 		return textResult(result), nil, nil
 	default:
-		return errorResult(errors.New("operation must be one of: list, grant, revoke")), nil, nil
+		return errorTextResult(errors.New("operation must be one of: list, grant, revoke"), authCtx), nil, nil
 	}
 }
 
@@ -1089,15 +1379,35 @@ func (s *Server) handleDocDelete(
 	_ *mcp.CallToolRequest,
 	in docDeleteInput,
 ) (*mcp.CallToolResult, any, error) {
-	docToken := normalizeDocToken(in.DocToken)
+	docToken := normalizeFileToken(in.DocToken)
 	if docToken == "" {
-		return errorResult(errors.New("doc_token is required")), nil, nil
+		return errorTextResult(errors.New("doc_token is required"), nil), nil, nil
 	}
 
 	meta := newInvokeMeta(in.Channel, in.ChatID, in.SenderID)
+	authCtx, err := s.selectAuthContext(meta)
+	if err != nil {
+		s.auditSafe(auditRecord{
+			Tool:               toolDocDelete,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Target:             docToken,
+			Status:             "error",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
+			Error:              err.Error(),
+		})
+		return errorTextResult(err, authCtx), nil, nil
+	}
+	metaInfo, metaErr := s.resolveFileMeta(ctx, docToken, authCtx)
+	if metaErr != nil {
+		return errorTextResult(metaErr, authCtx), nil, nil
+	}
 	action, pendingResult := s.prepareWriteAction(
 		toolDocDelete,
 		meta,
+		authCtx,
 		in.ActionID,
 		in.Confirmation,
 		map[string]any{"doc_token": docToken},
@@ -1110,15 +1420,16 @@ func (s *Server) handleDocDelete(
 
 	resp, err := s.client.Drive.V1.File.Delete(ctx, larkdrive.NewDeleteFileReqBuilder().
 		FileToken(docToken).
-		Type(feishuDocType).
-		Build())
+		Type(metaInfo.Type).
+		Build(), authCtx.RequestOptions...)
 	if err != nil {
-		return s.writeErrorWithAudit(toolDocDelete, meta, action, err), nil, nil
+		return s.writeErrorWithAudit(toolDocDelete, meta, authCtx, action, err), nil, nil
 	}
 	if !resp.Success() {
 		return s.writeErrorWithAudit(
 			toolDocDelete,
 			meta,
+			authCtx,
 			action,
 			fmt.Errorf("delete doc api error: code=%d msg=%s", resp.Code, resp.Msg),
 		), nil, nil
@@ -1128,21 +1439,25 @@ func (s *Server) handleDocDelete(
 		s.confirmations.Consume(action.ID)
 	}
 
-	result := map[string]any{
+	result := attachCommonResultFields(map[string]any{
 		"status":    "ok",
 		"doc_token": docToken,
+		"token":     docToken,
+		"type":      metaInfo.Type,
 		"deleted":   true,
 		"action_id": actionIDOrEmpty(action),
-	}
+	}, authCtx)
 	s.auditSafe(auditRecord{
-		Tool:     toolDocDelete,
-		ActionID: actionIDOrEmpty(action),
-		Channel:  meta.Channel,
-		ChatID:   meta.ChatID,
-		SenderID: meta.SenderID,
-		Target:   docToken,
-		Status:   "success",
-		Details:  map[string]any{"deleted": true},
+		Tool:               toolDocDelete,
+		ActionID:           actionIDOrEmpty(action),
+		Channel:            meta.Channel,
+		ChatID:             meta.ChatID,
+		SenderID:           meta.SenderID,
+		Target:             docToken,
+		Status:             "success",
+		AuthMode:           authCtx.Mode,
+		BoundIdentityMatch: authCtx.BoundIdentityMatch,
+		Details:            map[string]any{"deleted": true, "type": metaInfo.Type},
 	})
 
 	return textResult(result), nil, nil
@@ -1152,12 +1467,13 @@ func (s *Server) listBlockSummaries(
 	ctx context.Context,
 	docToken string,
 	pageSize int,
+	authCtx *callAuthContext,
 ) ([]map[string]any, bool, string, error) {
 	resp, err := s.client.Docx.V1.DocumentBlock.List(ctx, larkdocx.NewListDocumentBlockReqBuilder().
 		DocumentId(docToken).
 		DocumentRevisionId(-1).
 		PageSize(pageSize).
-		Build())
+		Build(), authCtx.RequestOptions...)
 	if err != nil {
 		return nil, false, "", err
 	}
@@ -1173,7 +1489,7 @@ func (s *Server) listBlockSummaries(
 	return items, boolVal(resp.Data.HasMore), strVal(resp.Data.PageToken), nil
 }
 
-func (s *Server) listRootChildren(ctx context.Context, docToken string) ([]*larkdocx.Block, error) {
+func (s *Server) listRootChildren(ctx context.Context, docToken string, authCtx *callAuthContext) ([]*larkdocx.Block, error) {
 	pageToken := ""
 	children := make([]*larkdocx.Block, 0)
 
@@ -1188,7 +1504,7 @@ func (s *Server) listRootChildren(ctx context.Context, docToken string) ([]*lark
 			builder.PageToken(pageToken)
 		}
 
-		resp, err := s.client.Docx.V1.DocumentBlockChildren.Get(ctx, builder.Build())
+		resp, err := s.client.Docx.V1.DocumentBlockChildren.Get(ctx, builder.Build(), authCtx.RequestOptions...)
 		if err != nil {
 			return nil, err
 		}
@@ -1215,14 +1531,15 @@ func (s *Server) replaceDocumentContent(
 	docToken string,
 	content string,
 	contentType string,
+	authCtx *callAuthContext,
 ) error {
-	children, err := s.listRootChildren(ctx, docToken)
+	children, err := s.listRootChildren(ctx, docToken, authCtx)
 	if err != nil {
 		return err
 	}
 
 	if len(children) > 0 {
-		if err := s.deleteRootChildren(ctx, docToken, len(children)); err != nil {
+		if err := s.deleteRootChildren(ctx, docToken, len(children), authCtx); err != nil {
 			return err
 		}
 	}
@@ -1231,7 +1548,7 @@ func (s *Server) replaceDocumentContent(
 		return nil
 	}
 
-	return s.insertDocumentContent(ctx, docToken, content, contentType, 0)
+	return s.insertDocumentContent(ctx, docToken, content, contentType, 0, authCtx)
 }
 
 func (s *Server) appendDocumentContent(
@@ -1239,16 +1556,17 @@ func (s *Server) appendDocumentContent(
 	docToken string,
 	content string,
 	contentType string,
+	authCtx *callAuthContext,
 ) error {
-	children, err := s.listRootChildren(ctx, docToken)
+	children, err := s.listRootChildren(ctx, docToken, authCtx)
 	if err != nil {
 		return err
 	}
 
-	return s.insertDocumentContent(ctx, docToken, content, contentType, len(children))
+	return s.insertDocumentContent(ctx, docToken, content, contentType, len(children), authCtx)
 }
 
-func (s *Server) deleteRootChildren(ctx context.Context, docToken string, childCount int) error {
+func (s *Server) deleteRootChildren(ctx context.Context, docToken string, childCount int, authCtx *callAuthContext) error {
 	if childCount <= 0 {
 		return nil
 	}
@@ -1264,7 +1582,7 @@ func (s *Server) deleteRootChildren(ctx context.Context, docToken string, childC
 		Body(body).
 		Build()
 
-	resp, err := s.client.Docx.V1.DocumentBlockChildren.BatchDelete(ctx, req)
+	resp, err := s.client.Docx.V1.DocumentBlockChildren.BatchDelete(ctx, req, authCtx.RequestOptions...)
 	if err != nil {
 		return err
 	}
@@ -1281,6 +1599,7 @@ func (s *Server) insertDocumentContent(
 	content string,
 	contentType string,
 	index int,
+	authCtx *callAuthContext,
 ) error {
 	if strings.TrimSpace(content) == "" {
 		return nil
@@ -1291,7 +1610,7 @@ func (s *Server) insertDocumentContent(
 			ContentType(contentType).
 			Content(content).
 			Build()).
-		Build())
+		Build(), authCtx.RequestOptions...)
 	if err != nil {
 		return err
 	}
@@ -1313,7 +1632,7 @@ func (s *Server) insertDocumentContent(
 		Body(bodyBuilder.Build()).
 		Build()
 
-	createResp, createErr := s.client.Docx.V1.DocumentBlockDescendant.Create(ctx, req)
+	createResp, createErr := s.client.Docx.V1.DocumentBlockDescendant.Create(ctx, req, authCtx.RequestOptions...)
 	if createErr != nil {
 		return createErr
 	}
@@ -1327,6 +1646,7 @@ func (s *Server) insertDocumentContent(
 func (s *Server) prepareWriteAction(
 	tool string,
 	meta invokeMeta,
+	authCtx *callAuthContext,
 	actionID string,
 	confirmation string,
 	payload any,
@@ -1334,24 +1654,37 @@ func (s *Server) prepareWriteAction(
 	target string,
 ) (*pendingAction, *mcp.CallToolResult) {
 	confirmText := strings.TrimSpace(confirmation)
+	authMode := authModeApp
+	var boundIdentityMatch *bool
+	if authCtx != nil {
+		if strings.TrimSpace(authCtx.Mode) != "" {
+			authMode = authCtx.Mode
+		}
+		boundIdentityMatch = authCtx.BoundIdentityMatch
+	}
 	if confirmText == "" {
-		action, err := s.confirmations.Create(tool, meta.ContextKey, meta.SenderID, payload, preview, s.now())
+		action, err := s.confirmations.Create(tool, meta.ContextKey, meta.SenderID, authMode, payload, preview, s.now())
 		if err != nil {
-			return nil, errorResult(err)
+			return nil, errorTextResult(err, authCtx)
 		}
 
 		s.auditSafe(auditRecord{
-			Tool:     tool,
-			ActionID: action.ID,
-			Channel:  meta.Channel,
-			ChatID:   meta.ChatID,
-			SenderID: meta.SenderID,
-			Target:   target,
-			Status:   "pending_confirmation",
-			Details:  map[string]any{"preview": preview, "expires_at": action.ExpiresAt.UTC().Format(time.RFC3339Nano)},
+			Tool:               tool,
+			ActionID:           action.ID,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Target:             target,
+			Status:             "pending_confirmation",
+			AuthMode:           authMode,
+			BoundIdentityMatch: boundIdentityMatch,
+			Details: map[string]any{
+				"preview":    preview,
+				"expires_at": action.ExpiresAt.UTC().Format(time.RFC3339Nano),
+			},
 		})
 
-		return nil, textResult(map[string]any{
+		return nil, textResult(attachCommonResultFields(map[string]any{
 			"status":     "pending_confirmation",
 			"action_id":  action.ID,
 			"tool":       tool,
@@ -1359,51 +1692,57 @@ func (s *Server) prepareWriteAction(
 			"preview":    preview,
 			"expires_at": action.ExpiresAt.UTC().Format(time.RFC3339Nano),
 			"next_step":  "请保持参数不变，携带 action_id 并在 confirmation 中填写任意确认语后重试。",
-		})
+		}, authCtx))
 	}
 
 	if strings.TrimSpace(actionID) == "" {
 		err := errors.New("action_id is required when confirmation is provided")
 		s.auditSafe(auditRecord{
-			Tool:     tool,
-			Channel:  meta.Channel,
-			ChatID:   meta.ChatID,
-			SenderID: meta.SenderID,
-			Target:   target,
-			Status:   "error",
-			Error:    err.Error(),
+			Tool:               tool,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Target:             target,
+			Status:             "error",
+			AuthMode:           authMode,
+			BoundIdentityMatch: boundIdentityMatch,
+			Error:              err.Error(),
 		})
-		return nil, errorResult(err)
+		return nil, errorTextResult(err, authCtx)
 	}
 
-	action, err := s.confirmations.Validate(actionID, tool, meta.ContextKey, payload, s.now())
+	action, err := s.confirmations.Validate(actionID, tool, meta.ContextKey, authMode, payload, s.now())
 	if err != nil {
 		s.auditSafe(auditRecord{
-			Tool:     tool,
-			ActionID: actionID,
-			Channel:  meta.Channel,
-			ChatID:   meta.ChatID,
-			SenderID: meta.SenderID,
-			Target:   target,
-			Status:   "error",
-			Error:    err.Error(),
+			Tool:               tool,
+			ActionID:           actionID,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Target:             target,
+			Status:             "error",
+			AuthMode:           authMode,
+			BoundIdentityMatch: boundIdentityMatch,
+			Error:              err.Error(),
 		})
-		return nil, errorResult(err)
+		return nil, errorTextResult(err, authCtx)
 	}
 
 	if action.SenderID != "" && meta.SenderID != "" && action.SenderID != meta.SenderID {
 		err := fmt.Errorf("action_id %q does not match current sender", actionID)
 		s.auditSafe(auditRecord{
-			Tool:     tool,
-			ActionID: actionID,
-			Channel:  meta.Channel,
-			ChatID:   meta.ChatID,
-			SenderID: meta.SenderID,
-			Target:   target,
-			Status:   "error",
-			Error:    err.Error(),
+			Tool:               tool,
+			ActionID:           actionID,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Target:             target,
+			Status:             "error",
+			AuthMode:           authMode,
+			BoundIdentityMatch: boundIdentityMatch,
+			Error:              err.Error(),
 		})
-		return nil, errorResult(err)
+		return nil, errorTextResult(err, authCtx)
 	}
 
 	return action, nil
@@ -1412,6 +1751,7 @@ func (s *Server) prepareWriteAction(
 func (s *Server) writeErrorWithAudit(
 	tool string,
 	meta invokeMeta,
+	authCtx *callAuthContext,
 	action *pendingAction,
 	err error,
 ) *mcp.CallToolResult {
@@ -1423,8 +1763,20 @@ func (s *Server) writeErrorWithAudit(
 		SenderID: meta.SenderID,
 		Status:   "error",
 		Error:    err.Error(),
+		AuthMode: func() string {
+			if authCtx == nil || strings.TrimSpace(authCtx.Mode) == "" {
+				return ""
+			}
+			return authCtx.Mode
+		}(),
+		BoundIdentityMatch: func() *bool {
+			if authCtx == nil {
+				return nil
+			}
+			return authCtx.BoundIdentityMatch
+		}(),
 	})
-	return errorResult(err)
+	return errorTextResult(err, authCtx)
 }
 
 func (s *Server) auditSafe(rec auditRecord) {

@@ -14,7 +14,7 @@ func TestConfirmationManagerCreateValidateAndConsume(t *testing.T) {
 		"strategy":  "replace",
 	}
 
-	action, err := manager.Create("doc_update", "feishu:chat-1", "user-1", payload, "preview", now)
+	action, err := manager.Create("doc_update", "feishu:chat-1", "user-1", authModeUser, payload, "preview", now)
 	if err != nil {
 		t.Fatalf("create action failed: %v", err)
 	}
@@ -22,12 +22,12 @@ func TestConfirmationManagerCreateValidateAndConsume(t *testing.T) {
 		t.Fatal("expected non-empty action id")
 	}
 
-	if _, err := manager.Validate(action.ID, "doc_update", "feishu:chat-1", payload, now.Add(time.Minute)); err != nil {
+	if _, err := manager.Validate(action.ID, "doc_update", "feishu:chat-1", authModeUser, payload, now.Add(time.Minute)); err != nil {
 		t.Fatalf("validate action failed: %v", err)
 	}
 
 	manager.Consume(action.ID)
-	if _, err := manager.Validate(action.ID, "doc_update", "feishu:chat-1", payload, now.Add(time.Minute)); err == nil {
+	if _, err := manager.Validate(action.ID, "doc_update", "feishu:chat-1", authModeUser, payload, now.Add(time.Minute)); err == nil {
 		t.Fatal("expected consumed action to be invalid")
 	}
 }
@@ -37,7 +37,7 @@ func TestConfirmationManagerValidatePayloadMismatch(t *testing.T) {
 	manager := newConfirmationManager(2 * time.Minute)
 
 	payloadA := map[string]any{"content": "A"}
-	action, err := manager.Create("doc_update", "feishu:chat-1", "user-1", payloadA, "preview", now)
+	action, err := manager.Create("doc_update", "feishu:chat-1", "user-1", authModeUser, payloadA, "preview", now)
 	if err != nil {
 		t.Fatalf("create action failed: %v", err)
 	}
@@ -47,6 +47,7 @@ func TestConfirmationManagerValidatePayloadMismatch(t *testing.T) {
 		action.ID,
 		"doc_update",
 		"feishu:chat-1",
+		authModeUser,
 		payloadB,
 		now.Add(time.Minute),
 	); err == nil {
@@ -59,7 +60,7 @@ func TestConfirmationManagerValidateContextMismatch(t *testing.T) {
 	manager := newConfirmationManager(2 * time.Minute)
 
 	payload := map[string]any{"doc_token": "doccnX"}
-	action, err := manager.Create("doc_delete", "feishu:chat-1", "user-1", payload, "preview", now)
+	action, err := manager.Create("doc_delete", "feishu:chat-1", "user-1", authModeApp, payload, "preview", now)
 	if err != nil {
 		t.Fatalf("create action failed: %v", err)
 	}
@@ -68,6 +69,7 @@ func TestConfirmationManagerValidateContextMismatch(t *testing.T) {
 		action.ID,
 		"doc_delete",
 		"feishu:chat-2",
+		authModeApp,
 		payload,
 		now.Add(time.Minute),
 	); err == nil {
@@ -80,7 +82,7 @@ func TestConfirmationManagerExpiredAction(t *testing.T) {
 	manager := newConfirmationManager(30 * time.Second)
 
 	payload := map[string]any{"doc_token": "doccnX"}
-	action, err := manager.Create("doc_share", "feishu:chat-1", "user-1", payload, "preview", now)
+	action, err := manager.Create("doc_share", "feishu:chat-1", "user-1", authModeUser, payload, "preview", now)
 	if err != nil {
 		t.Fatalf("create action failed: %v", err)
 	}
@@ -89,9 +91,32 @@ func TestConfirmationManagerExpiredAction(t *testing.T) {
 		action.ID,
 		"doc_share",
 		"feishu:chat-1",
+		authModeUser,
 		payload,
 		now.Add(31*time.Second),
 	); err == nil {
 		t.Fatal("expected expired action validation error")
+	}
+}
+
+func TestConfirmationManagerValidateAuthModeMismatch(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	manager := newConfirmationManager(2 * time.Minute)
+
+	payload := map[string]any{"doc_token": "doccn-auth-mode"}
+	action, err := manager.Create("doc_delete", "feishu:chat-1", "user-1", authModeApp, payload, "preview", now)
+	if err != nil {
+		t.Fatalf("create action failed: %v", err)
+	}
+
+	if _, err := manager.Validate(
+		action.ID,
+		"doc_delete",
+		"feishu:chat-1",
+		authModeUser,
+		payload,
+		now.Add(time.Minute),
+	); err == nil {
+		t.Fatal("expected auth mode mismatch validation error")
 	}
 }

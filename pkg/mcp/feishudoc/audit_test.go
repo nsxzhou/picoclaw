@@ -20,10 +20,12 @@ func TestAuditLoggerWrite(t *testing.T) {
 		SenderID: "user-1",
 		Target:   "doccn123",
 		Status:   "success",
+		AuthMode: authModeUser,
 		Details: map[string]any{
 			"strategy": "replace",
 		},
 	}
+	record.BoundIdentityMatch = boolPtr(true)
 
 	if err := logger.Write(record); err != nil {
 		t.Fatalf("write audit record failed: %v", err)
@@ -52,6 +54,12 @@ func TestAuditLoggerWrite(t *testing.T) {
 	}
 	if got.Channel != "feishu" || got.ChatID != "chat-1" {
 		t.Fatalf("unexpected channel/chat: %s/%s", got.Channel, got.ChatID)
+	}
+	if got.AuthMode != authModeUser {
+		t.Fatalf("unexpected auth mode: %s", got.AuthMode)
+	}
+	if got.BoundIdentityMatch == nil || !*got.BoundIdentityMatch {
+		t.Fatal("expected bound identity match to be true")
 	}
 }
 

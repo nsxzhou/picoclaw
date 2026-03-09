@@ -10,16 +10,18 @@ import (
 )
 
 type auditRecord struct {
-	Timestamp string         `json:"timestamp"`
-	Tool      string         `json:"tool"`
-	ActionID  string         `json:"action_id,omitempty"`
-	Channel   string         `json:"channel"`
-	ChatID    string         `json:"chat_id"`
-	SenderID  string         `json:"sender_id,omitempty"`
-	Target    string         `json:"target,omitempty"`
-	Status    string         `json:"status"`
-	Details   map[string]any `json:"details,omitempty"`
-	Error     string         `json:"error,omitempty"`
+	Timestamp          string         `json:"timestamp"`
+	Tool               string         `json:"tool"`
+	ActionID           string         `json:"action_id,omitempty"`
+	Channel            string         `json:"channel"`
+	ChatID             string         `json:"chat_id"`
+	SenderID           string         `json:"sender_id,omitempty"`
+	Target             string         `json:"target,omitempty"`
+	Status             string         `json:"status"`
+	AuthMode           string         `json:"auth_mode,omitempty"`
+	BoundIdentityMatch *bool          `json:"bound_identity_match,omitempty"`
+	Details            map[string]any `json:"details,omitempty"`
+	Error              string         `json:"error,omitempty"`
 }
 
 type auditLogger struct {
@@ -62,4 +64,3 @@ func (l *auditLogger) Write(rec auditRecord) error {
 
 	return nil
 }
-

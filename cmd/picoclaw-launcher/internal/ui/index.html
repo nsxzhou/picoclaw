@@ -600,6 +600,16 @@
                                 <button class="btn btn-sm btn-primary" onclick="loginProvider('google-antigravity')" data-i18n="auth.loginOAuth">Login (Browser OAuth)</button>
                             </div>
                         </div>
+                        <div class="provider-card" id="card-feishu">
+                            <div class="provider-card-header">
+                                <span class="provider-name">Feishu</span>
+                                <span class="provider-badge badge-none" id="badge-feishu" data-i18n="auth.notLoggedIn">Not logged in</span>
+                            </div>
+                            <div id="details-feishu"></div>
+                            <div class="provider-actions" id="actions-feishu">
+                                <button class="btn btn-sm btn-primary" onclick="loginProvider('feishu')" data-i18n="auth.loginOAuth">Login (Browser OAuth)</button>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -779,6 +789,12 @@ const i18nData = {
         'auth.account': 'Account',
         'auth.project': 'Project',
         'auth.expires': 'Expires',
+        'auth.displayName': 'Display Name',
+        'auth.tenantKey': 'Tenant Key',
+        'auth.userId': 'User ID',
+        'auth.openId': 'Open ID',
+        'auth.unionId': 'Union ID',
+        'auth.scope': 'Scope',
         // Channel
         'ch.configure': 'Configure {name} channel settings.',
         'ch.docLink': 'Configuration Guide',
@@ -893,6 +909,12 @@ const i18nData = {
         'auth.account': '\u8D26\u53F7',
         'auth.project': '\u9879\u76EE',
         'auth.expires': '\u8FC7\u671F\u65F6\u95F4',
+        'auth.displayName': '\u663E\u793A\u540D',
+        'auth.tenantKey': 'Tenant Key',
+        'auth.userId': 'User ID',
+        'auth.openId': 'Open ID',
+        'auth.unionId': 'Union ID',
+        'auth.scope': 'Scope',
         'ch.configure': '\u914D\u7F6E {name} \u901A\u9053\u8BBE\u7F6E\u3002',
         'ch.docLink': '\u914D\u7F6E\u6307\u5357',
         'ch.accessControl': '\u8BBF\u95EE\u63A7\u5236',
@@ -1571,11 +1593,13 @@ function renderAuthStatus(providersList, pendingDevice) {
     const providerMap = {};
     providersList.forEach(p => { providerMap[p.provider] = p; });
 
-    ['openai', 'anthropic', 'google-antigravity'].forEach(name => {
+    ['openai', 'anthropic', 'google-antigravity', 'feishu'].forEach(name => {
         const badge = document.getElementById('badge-' + name);
         const details = document.getElementById('details-' + name);
         const actions = document.getElementById('actions-' + name);
         const p = providerMap[name];
+
+        if (!badge || !details || !actions) return;
 
         if (p) {
             const badgeClass = p.status === 'active' ? 'badge-active' :
@@ -1590,6 +1614,12 @@ function renderAuthStatus(providersList, pendingDevice) {
             if (p.email) dh += `<div class="provider-detail"><strong>${t('auth.email')}:</strong> ${p.email}</div>`;
             if (p.account_id) dh += `<div class="provider-detail"><strong>${t('auth.account')}:</strong> ${p.account_id}</div>`;
             if (p.project_id) dh += `<div class="provider-detail"><strong>${t('auth.project')}:</strong> ${p.project_id}</div>`;
+            if (p.display_name) dh += `<div class="provider-detail"><strong>${t('auth.displayName')}:</strong> ${p.display_name}</div>`;
+            if (p.tenant_key) dh += `<div class="provider-detail"><strong>${t('auth.tenantKey')}:</strong> ${p.tenant_key}</div>`;
+            if (p.user_id) dh += `<div class="provider-detail"><strong>${t('auth.userId')}:</strong> ${p.user_id}</div>`;
+            if (p.open_id) dh += `<div class="provider-detail"><strong>${t('auth.openId')}:</strong> ${p.open_id}</div>`;
+            if (p.union_id) dh += `<div class="provider-detail"><strong>${t('auth.unionId')}:</strong> ${p.union_id}</div>`;
+            if (p.scope) dh += `<div class="provider-detail"><strong>${t('auth.scope')}:</strong> ${p.scope}</div>`;
             if (p.expires_at) {
                 const d = new Date(p.expires_at);
                 dh += `<div class="provider-detail"><strong>${t('auth.expires')}:</strong> ${d.toLocaleString()}</div>`;
@@ -1605,7 +1635,7 @@ function renderAuthStatus(providersList, pendingDevice) {
             } else if (name === 'anthropic') {
                 actions.innerHTML = `<button class="btn btn-sm btn-primary" onclick="showTokenInput('anthropic')">${t('auth.loginToken')}</button>`;
             } else {
-                actions.innerHTML = `<button class="btn btn-sm btn-primary" onclick="loginProvider('google-antigravity')">${t('auth.loginOAuth')}</button>`;
+                actions.innerHTML = `<button class="btn btn-sm btn-primary" onclick="loginProvider('${name}')">${t('auth.loginOAuth')}</button>`;
             }
         }
     });

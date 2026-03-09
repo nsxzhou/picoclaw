@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	supportedProvidersMsg = "supported providers: openai, anthropic, google-antigravity"
+	supportedProvidersMsg = "supported providers: openai, anthropic, google-antigravity, feishu"
 	defaultAnthropicModel = "claude-sonnet-4.6"
 )
 
@@ -29,9 +29,55 @@ func authLoginCmd(provider string, useDeviceCode bool, useOauth bool) error {
 		return authLoginAnthropic(useOauth)
 	case "google-antigravity", "antigravity":
 		return authLoginGoogleAntigravity()
+	case "feishu":
+		return authLoginFeishu()
 	default:
 		return fmt.Errorf("unsupported provider: %s (%s)", provider, supportedProvidersMsg)
 	}
+}
+
+func authLoginFeishu() error {
+	appCfg, err := internal.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	appID := strings.TrimSpace(appCfg.Channels.Feishu.AppID)
+	appSecret := strings.TrimSpace(appCfg.Channels.Feishu.AppSecret)
+	if appID == "" || appSecret == "" {
+		return fmt.Errorf("feishu app_id/app_secret are required in channels.feishu before login")
+	}
+
+	cred, err := auth.LoginFeishuBrowser(appID, appSecret)
+	if err != nil {
+		return fmt.Errorf("login failed: %w", err)
+	}
+	if err := auth.SetCredential(auth.FeishuCredentialProvider, cred); err != nil {
+		return fmt.Errorf("failed to save credentials: %w", err)
+	}
+
+	fmt.Println("Feishu login successful!")
+	if cred.DisplayName != "" {
+		fmt.Printf("Name: %s\n", cred.DisplayName)
+	}
+	if cred.Email != "" {
+		fmt.Printf("Email: %s\n", cred.Email)
+	}
+	if cred.UserID != "" {
+		fmt.Printf("User ID: %s\n", cred.UserID)
+	}
+	if cred.OpenID != "" {
+		fmt.Printf("Open ID: %s\n", cred.OpenID)
+	}
+	if cred.UnionID != "" {
+		fmt.Printf("Union ID: %s\n", cred.UnionID)
+	}
+	if cred.TenantKey != "" {
+		fmt.Printf("Tenant: %s\n", cred.TenantKey)
+	}
+	if len(cred.Scope) > 0 {
+		fmt.Printf("Scope: %s\n", strings.Join(cred.Scope, ", "))
+	}
+	return nil
 }
 
 func authLoginOpenAI(useDeviceCode bool) error {
@@ -342,7 +388,11 @@ func authLoginPasteToken(provider string) error {
 
 func authLogoutCmd(provider string) error {
 	if provider != "" {
-		if err := auth.DeleteCredential(provider); err != nil {
+		deleteProvider := provider
+		if provider == "feishu" {
+			deleteProvider = auth.FeishuCredentialProvider
+		}
+		if err := auth.DeleteCredential(deleteProvider); err != nil {
 			return fmt.Errorf("failed to remove credentials: %w", err)
 		}
 
@@ -419,6 +469,10 @@ func authStatusCmd() error {
 	fmt.Println("\nAuthenticated Providers:")
 	fmt.Println("------------------------")
 	for provider, cred := range store.Credentials {
+		displayProvider := provider
+		if provider == auth.FeishuCredentialProvider {
+			displayProvider = "feishu"
+		}
 		status := "active"
 		if cred.IsExpired() {
 			status = "expired"
@@ -426,7 +480,7 @@ func authStatusCmd() error {
 			status = "needs refresh"
 		}
 
-		fmt.Printf("  %s:\n", provider)
+		fmt.Printf("  %s:\n", displayProvider)
 		fmt.Printf("    Method: %s\n", cred.AuthMethod)
 		fmt.Printf("    Status: %s\n", status)
 		if cred.AccountID != "" {
@@ -437,6 +491,24 @@ func authStatusCmd() error {
 		}
 		if cred.ProjectID != "" {
 			fmt.Printf("    Project: %s\n", cred.ProjectID)
+		}
+		if cred.DisplayName != "" {
+			fmt.Printf("    Display Name: %s\n", cred.DisplayName)
+		}
+		if cred.TenantKey != "" {
+			fmt.Printf("    Tenant Key: %s\n", cred.TenantKey)
+		}
+		if cred.UserID != "" {
+			fmt.Printf("    User ID: %s\n", cred.UserID)
+		}
+		if cred.OpenID != "" {
+			fmt.Printf("    Open ID: %s\n", cred.OpenID)
+		}
+		if cred.UnionID != "" {
+			fmt.Printf("    Union ID: %s\n", cred.UnionID)
+		}
+		if len(cred.Scope) > 0 {
+			fmt.Printf("    Scope: %s\n", strings.Join(cred.Scope, ", "))
 		}
 		if !cred.ExpiresAt.IsZero() {
 			fmt.Printf("    Expires: %s\n", cred.ExpiresAt.Format("2006-01-02 15:04"))
@@ -505,6 +577,24 @@ func authModelsCmd() error {
 	}
 
 	return nil
+}
+
+func refreshFeishuCredentialIfNeeded(cred *auth.AuthCredential, cfg *config.Config) (*auth.AuthCredential, error) {
+	if cred == nil || !cred.NeedsRefresh() || cred.RefreshToken == "" || cfg == nil {
+		return cred, nil
+	}
+	refreshed, err := auth.RefreshFeishuAccessToken(
+		cred,
+		cfg.Channels.Feishu.AppID,
+		cfg.Channels.Feishu.AppSecret,
+	)
+	if err != nil {
+		return cred, err
+	}
+	if err := auth.SetCredential(auth.FeishuCredentialProvider, refreshed); err != nil {
+		return refreshed, err
+	}
+	return refreshed, nil
 }
 
 // isAntigravityModel checks if a model string belongs to antigravity provider

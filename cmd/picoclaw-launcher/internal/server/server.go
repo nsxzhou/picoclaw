@@ -6,6 +6,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"reflect"
+	"strings"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/auth"
@@ -16,13 +18,19 @@ const DefaultPort = "18800"
 
 // providerStatus represents the auth status of a single provider in API responses.
 type providerStatus struct {
-	Provider   string `json:"provider"`
-	AuthMethod string `json:"auth_method"`
-	Status     string `json:"status"`
-	AccountID  string `json:"account_id,omitempty"`
-	Email      string `json:"email,omitempty"`
-	ProjectID  string `json:"project_id,omitempty"`
-	ExpiresAt  string `json:"expires_at,omitempty"`
+	Provider    string `json:"provider"`
+	AuthMethod  string `json:"auth_method"`
+	Status      string `json:"status"`
+	AccountID   string `json:"account_id,omitempty"`
+	Email       string `json:"email,omitempty"`
+	ProjectID   string `json:"project_id,omitempty"`
+	ExpiresAt   string `json:"expires_at,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	TenantKey   string `json:"tenant_key,omitempty"`
+	UserID      string `json:"user_id,omitempty"`
+	OpenID      string `json:"open_id,omitempty"`
+	UnionID     string `json:"union_id,omitempty"`
+	Scope       string `json:"scope,omitempty"`
 }
 
 // ── Route registration ───────────────────────────────────────────
@@ -90,13 +98,14 @@ func RegisterAuthAPI(mux *http.ServeMux, absPath string) {
 				status = "needs_refresh"
 			}
 			ps := providerStatus{
-				Provider:   name,
+				Provider:   normalizeAuthProviderName(name),
 				AuthMethod: cred.AuthMethod,
 				Status:     status,
 				AccountID:  cred.AccountID,
 				Email:      cred.Email,
 				ProjectID:  cred.ProjectID,
 			}
+			applyFeishuProviderDetails(&ps, cred)
 			if !cred.ExpiresAt.IsZero() {
 				ps.ExpiresAt = cred.ExpiresAt.Format(time.RFC3339)
 			}
@@ -151,11 +160,13 @@ func RegisterAuthAPI(mux *http.ServeMux, absPath string) {
 			handleAnthropicLogin(w, req.Token, absPath)
 		case "google-antigravity", "antigravity":
 			handleGoogleAntigravityLogin(w, r, absPath)
+		case "feishu":
+			handleFeishuLogin(w, r, absPath)
 		default:
 			http.Error(
 				w,
 				fmt.Sprintf(
-					"Unsupported provider: %s (supported: openai, anthropic, google-antigravity)",
+					"Unsupported provider: %s (supported: openai, anthropic, google-antigravity, feishu)",
 					req.Provider,
 				),
 				http.StatusBadRequest,
@@ -180,11 +191,14 @@ func RegisterAuthAPI(mux *http.ServeMux, absPath string) {
 			}
 			clearAllAuthMethodsInConfig(absPath)
 		} else {
-			if err := auth.DeleteCredential(req.Provider); err != nil {
+			deleteProvider := providerCredentialKey(req.Provider)
+			if err := auth.DeleteCredential(deleteProvider); err != nil {
 				http.Error(w, fmt.Sprintf("Failed to logout: %v", err), http.StatusInternalServerError)
 				return
 			}
-			clearAuthMethodInConfig(absPath, req.Provider)
+			if deleteProvider == req.Provider {
+				clearAuthMethodInConfig(absPath, req.Provider)
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -193,4 +207,90 @@ func RegisterAuthAPI(mux *http.ServeMux, absPath string) {
 
 	// GET /auth/callback — OAuth browser callback for Google Antigravity
 	mux.HandleFunc("GET /auth/callback", handleOAuthCallback)
+}
+
+func normalizeAuthProviderName(provider string) string {
+	switch provider {
+	case feishuCredentialProvider:
+		return "feishu"
+	default:
+		return provider
+	}
+}
+
+func providerCredentialKey(provider string) string {
+	switch provider {
+	case "feishu":
+		return feishuCredentialProvider
+	default:
+		return provider
+	}
+}
+
+func applyFeishuProviderDetails(ps *providerStatus, cred *auth.AuthCredential) {
+	if ps == nil || cred == nil || ps.Provider != "feishu" {
+		return
+	}
+
+	ps.DisplayName = optionalCredentialString(cred, "DisplayName")
+	ps.TenantKey = optionalCredentialString(cred, "TenantKey")
+	ps.UserID = optionalCredentialString(cred, "UserID")
+	ps.OpenID = optionalCredentialString(cred, "OpenID")
+	ps.UnionID = optionalCredentialString(cred, "UnionID")
+	ps.Scope = optionalCredentialScope(cred)
+}
+
+func optionalCredentialString(cred *auth.AuthCredential, fieldName string) string {
+	if cred == nil {
+		return ""
+	}
+
+	value := reflect.ValueOf(cred)
+	if value.Kind() == reflect.Pointer {
+		value = value.Elem()
+	}
+	if !value.IsValid() || value.Kind() != reflect.Struct {
+		return ""
+	}
+
+	field := value.FieldByName(fieldName)
+	if !field.IsValid() || field.Kind() != reflect.String {
+		return ""
+	}
+	return field.String()
+}
+
+func optionalCredentialScope(cred *auth.AuthCredential) string {
+	if cred == nil {
+		return ""
+	}
+
+	value := reflect.ValueOf(cred)
+	if value.Kind() == reflect.Pointer {
+		value = value.Elem()
+	}
+	if !value.IsValid() || value.Kind() != reflect.Struct {
+		return ""
+	}
+
+	field := value.FieldByName("Scope")
+	if !field.IsValid() {
+		return ""
+	}
+
+	switch field.Kind() {
+	case reflect.String:
+		return field.String()
+	case reflect.Slice:
+		if field.Type().Elem().Kind() != reflect.String {
+			return ""
+		}
+		values := make([]string, 0, field.Len())
+		for i := 0; i < field.Len(); i++ {
+			values = append(values, field.Index(i).String())
+		}
+		return strings.Join(values, ",")
+	default:
+		return ""
+	}
 }

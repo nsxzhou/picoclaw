@@ -16,6 +16,7 @@ type pendingAction struct {
 	Tool        string
 	ContextKey  string
 	SenderID    string
+	AuthMode    string
 	PayloadHash string
 	Preview     string
 	ExpiresAt   time.Time
@@ -42,6 +43,7 @@ func (m *confirmationManager) Create(
 	tool string,
 	contextKey string,
 	senderID string,
+	authMode string,
 	payload any,
 	preview string,
 	now time.Time,
@@ -61,6 +63,7 @@ func (m *confirmationManager) Create(
 		Tool:        tool,
 		ContextKey:  contextKey,
 		SenderID:    senderID,
+		AuthMode:    authMode,
 		PayloadHash: payloadHash,
 		Preview:     preview,
 		ExpiresAt:   now.Add(m.ttl),
@@ -73,6 +76,7 @@ func (m *confirmationManager) Validate(
 	actionID string,
 	tool string,
 	contextKey string,
+	authMode string,
 	payload any,
 	now time.Time,
 ) (*pendingAction, error) {
@@ -92,6 +96,9 @@ func (m *confirmationManager) Validate(
 
 	if action.ContextKey != contextKey {
 		return nil, fmt.Errorf("action_id %q does not match current chat context", actionID)
+	}
+	if action.AuthMode != "" && authMode != "" && action.AuthMode != authMode {
+		return nil, fmt.Errorf("action_id %q does not match current auth mode", actionID)
 	}
 
 	hash, err := payloadHash(payload)

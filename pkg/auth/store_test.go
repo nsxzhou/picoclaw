@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -185,5 +186,46 @@ func TestLoadStoreEmpty(t *testing.T) {
 	}
 	if len(store.Credentials) != 0 {
 		t.Errorf("expected empty credentials, got %d", len(store.Credentials))
+	}
+}
+
+func TestLoadStoreFeishuScopeStringCompatibility(t *testing.T) {
+	tmpDir := t.TempDir()
+	origHome := os.Getenv("HOME")
+	t.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
+
+	path := filepath.Join(tmpDir, ".picoclaw", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir auth dir: %v", err)
+	}
+
+	store := map[string]any{
+		"credentials": map[string]any{
+			"feishu-user": map[string]any{
+				"access_token": "token",
+				"provider":     "feishu-user",
+				"auth_method":  "oauth",
+				"scope":        "docs:doc,drive:file",
+			},
+		},
+	}
+	raw, err := json.Marshal(store)
+	if err != nil {
+		t.Fatalf("marshal store: %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write auth store: %v", err)
+	}
+
+	loaded, err := GetCredential("feishu-user")
+	if err != nil {
+		t.Fatalf("GetCredential() error: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected credential to load")
+	}
+	if len(loaded.Scope) != 2 || loaded.Scope[0] != "docs:doc" || loaded.Scope[1] != "drive:file" {
+		t.Fatalf("unexpected scope: %#v", loaded.Scope)
 	}
 }

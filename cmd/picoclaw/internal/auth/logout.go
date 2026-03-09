@@ -14,7 +14,7 @@ func newLogoutCommand() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&provider, "provider", "p", "", "Provider to logout from (openai, anthropic); empty = all")
+	cmd.Flags().StringVarP(&provider, "provider", "p", "", "Provider to logout from (openai, anthropic, google-antigravity, feishu); empty = all")
 
 	return cmd
 }
