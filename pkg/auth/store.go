@@ -133,6 +133,9 @@ func LoadStore() (*AuthStore, error) {
 		}
 		return nil, err
 	}
+	if strings.TrimSpace(string(data)) == "" {
+		return &AuthStore{Credentials: make(map[string]*AuthCredential)}, nil
+	}
 
 	var store AuthStore
 	if err := json.Unmarshal(data, &store); err != nil {

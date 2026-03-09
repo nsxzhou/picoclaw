@@ -189,6 +189,32 @@ func TestLoadStoreEmpty(t *testing.T) {
 	}
 }
 
+func TestLoadStoreEmptyFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	origHome := os.Getenv("HOME")
+	t.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
+
+	path := filepath.Join(tmpDir, ".picoclaw", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir auth dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(""), 0o600); err != nil {
+		t.Fatalf("write empty auth store: %v", err)
+	}
+
+	store, err := LoadStore()
+	if err != nil {
+		t.Fatalf("LoadStore() error: %v", err)
+	}
+	if store == nil {
+		t.Fatal("LoadStore() returned nil")
+	}
+	if len(store.Credentials) != 0 {
+		t.Errorf("expected empty credentials for empty file, got %d", len(store.Credentials))
+	}
+}
+
 func TestLoadStoreFeishuScopeStringCompatibility(t *testing.T) {
 	tmpDir := t.TempDir()
 	origHome := os.Getenv("HOME")
