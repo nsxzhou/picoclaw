@@ -4,6 +4,8 @@ services:
   #   docker compose -f docker/docker-compose.full.yml run --rm picoclaw-agent -m "Hello"
   # ─────────────────────────────────────────────
   picoclaw-agent:
+    environment:
+      - TZ=Asia/Shanghai
     build:
       context: ..
       dockerfile: docker/Dockerfile.full
@@ -24,6 +26,8 @@ services:
   #   docker compose -f docker/docker-compose.full.yml --profile gateway up
   # ─────────────────────────────────────────────
   picoclaw-gateway:
+    environment:
+      - TZ=Asia/Shanghai
     build:
       context: ..
       dockerfile: docker/Dockerfile.full
