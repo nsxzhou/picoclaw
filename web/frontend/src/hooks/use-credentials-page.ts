@@ -18,6 +18,7 @@ function getProviderLabel(provider: OAuthProvider | ""): string {
   if (provider === "openai") return "OpenAI"
   if (provider === "anthropic") return "Anthropic"
   if (provider === "google-antigravity") return "Google Antigravity"
+  if (provider === "feishu") return "Feishu"
   return ""
 }
 
@@ -84,7 +85,7 @@ export function useCredentialsPage() {
         }
 
         setActiveFlow(flow)
-        setDeviceFlow((prev) =>
+        setDeviceFlow((prev: OAuthFlowState | null) =>
           prev?.flow_id === flow.flow_id ? { ...prev, ...flow } : prev,
         )
 
@@ -169,6 +170,7 @@ export function useCredentialsPage() {
   const openaiStatus = providersMap.get("openai")
   const anthropicStatus = providersMap.get("anthropic")
   const antigravityStatus = providersMap.get("google-antigravity")
+  const feishuStatus = providersMap.get("feishu")
 
   const bumpActionToken = useCallback(() => {
     actionTokenRef.current += 1
@@ -385,7 +387,7 @@ export function useCredentialsPage() {
     setActiveAction("")
     setDeviceSheetOpen(false)
     setDeviceFlow(null)
-    setActiveFlow((prev) => (prev?.status === "pending" ? null : prev))
+    setActiveFlow((prev: OAuthFlowState | null) => (prev?.status === "pending" ? null : prev))
   }, [bumpActionToken])
 
   const logoutProviderLabel = getProviderLabel(logoutConfirmProvider)
@@ -417,6 +419,7 @@ export function useCredentialsPage() {
     openaiStatus,
     anthropicStatus,
     antigravityStatus,
+    feishuStatus,
     logoutDialogOpen,
     logoutConfirmProvider,
     logoutProviderLabel,

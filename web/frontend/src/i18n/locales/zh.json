@@ -82,6 +82,9 @@
       },
       "antigravity": {
         "description": "使用浏览器 OAuth 登录 Google Cloud Code Assist。"
+      },
+      "feishu": {
+        "description": "使用浏览器 OAuth 登录飞书账号与文档服务。"
       }
     },
     "status": {
@@ -107,6 +110,7 @@
     },
     "labels": {
       "account": "账号",
+      "accountId": "账号 ID",
       "email": "邮箱",
       "project": "项目"
     },

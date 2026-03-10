@@ -7,6 +7,7 @@ import { useCredentialsPage } from "@/hooks/use-credentials-page"
 import { AnthropicCredentialCard } from "./anthropic-credential-card"
 import { AntigravityCredentialCard } from "./antigravity-credential-card"
 import { DeviceCodeSheet } from "./device-code-sheet"
+import { FeishuCredentialCard } from "./feishu-credential-card"
 import { LogoutConfirmDialog } from "./logout-confirm-dialog"
 import { OpenAICredentialCard } from "./openai-credential-card"
 
@@ -23,6 +24,7 @@ export function CredentialsPage() {
     openaiStatus,
     anthropicStatus,
     antigravityStatus,
+    feishuStatus,
     logoutDialogOpen,
     logoutConfirmProvider,
     logoutProviderLabel,
@@ -70,7 +72,7 @@ export function CredentialsPage() {
             {t("credentials.loading")}
           </div>
         ) : (
-          <div className="grid grid-cols-1 gap-4 py-5 lg:auto-rows-fr lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 py-5 lg:auto-rows-fr lg:grid-cols-2 xl:grid-cols-3">
             <OpenAICredentialCard
               status={openaiStatus}
               activeAction={activeAction}
@@ -103,6 +105,14 @@ export function CredentialsPage() {
                 void startBrowserOAuth("google-antigravity")
               }
               onAskLogout={() => askLogout("google-antigravity")}
+            />
+
+            <FeishuCredentialCard
+              status={feishuStatus}
+              activeAction={activeAction}
+              onStopLoading={stopLoading}
+              onStartBrowserOAuth={() => void startBrowserOAuth("feishu")}
+              onAskLogout={() => askLogout("feishu")}
             />
           </div>
         )}

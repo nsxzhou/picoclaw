@@ -21,6 +21,7 @@ const (
 	oauthProviderOpenAI            = "openai"
 	oauthProviderAnthropic         = "anthropic"
 	oauthProviderGoogleAntigravity = "google-antigravity"
+	oauthProviderFeishu            = "feishu"
 
 	oauthMethodBrowser    = "browser"
 	oauthMethodDeviceCode = "device_code"
@@ -42,18 +43,21 @@ var oauthProviderOrder = []string{
 	oauthProviderOpenAI,
 	oauthProviderAnthropic,
 	oauthProviderGoogleAntigravity,
+	oauthProviderFeishu,
 }
 
 var oauthProviderMethods = map[string][]string{
 	oauthProviderOpenAI:            {oauthMethodBrowser, oauthMethodDeviceCode, oauthMethodToken},
 	oauthProviderAnthropic:         {oauthMethodToken},
 	oauthProviderGoogleAntigravity: {oauthMethodBrowser},
+	oauthProviderFeishu:            {oauthMethodBrowser},
 }
 
 var oauthProviderLabels = map[string]string{
 	oauthProviderOpenAI:            "OpenAI",
 	oauthProviderAnthropic:         "Anthropic",
 	oauthProviderGoogleAntigravity: "Google Antigravity",
+	oauthProviderFeishu:            "Feishu",
 }
 
 var (
@@ -71,7 +75,16 @@ var (
 	oauthSaveConfig               = config.SaveConfig
 	oauthFetchAntigravityProject  = providers.FetchAntigravityProjectID
 	oauthFetchGoogleUserEmailFunc = fetchGoogleUserEmail
+	oauthBuildFeishuAuthorizeURL  = auth.BuildFeishuAuthorizeURL
+	oauthExchangeFeishuCode       = auth.ExchangeFeishuCode
 )
+
+func providerMapped(provider string) string {
+	if provider == oauthProviderFeishu {
+		return auth.FeishuCredentialProvider
+	}
+	return provider
+}
 
 type oauthFlow struct {
 	ID           string
@@ -130,7 +143,7 @@ func (h *Handler) handleListOAuthProviders(w http.ResponseWriter, r *http.Reques
 	providersResp := make([]oauthProviderStatus, 0, len(oauthProviderOrder))
 
 	for _, provider := range oauthProviderOrder {
-		cred, err := oauthGetCredential(provider)
+		cred, err := oauthGetCredential(providerMapped(provider))
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to load credentials: %v", err), http.StatusInternalServerError)
 			return
@@ -286,7 +299,23 @@ func (h *Handler) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 		}
 
 		redirectURI := buildOAuthRedirectURI(r)
-		authURL := oauthBuildAuthorizeURL(cfg, pkce, state, redirectURI)
+
+		var authURL string
+		if provider == oauthProviderFeishu {
+			appCfg, errLoad := oauthLoadConfig(h.configPath)
+			if errLoad != nil {
+				http.Error(w, fmt.Sprintf("failed to load config: %v", errLoad), http.StatusInternalServerError)
+				return
+			}
+			appID := strings.TrimSpace(appCfg.Channels.Feishu.AppID)
+			if appID == "" {
+				http.Error(w, "Feishu app_id is required in channels.feishu before login", http.StatusBadRequest)
+				return
+			}
+			authURL = oauthBuildFeishuAuthorizeURL(appID, pkce, state, redirectURI)
+		} else {
+			authURL = oauthBuildAuthorizeURL(cfg, pkce, state, redirectURI)
+		}
 
 		now := oauthNow()
 		flow := &oauthFlow{
@@ -435,7 +464,21 @@ func (h *Handler) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cred, err := oauthExchangeCodeForTokens(cfg, code, flow.CodeVerifier, flow.RedirectURI)
+	var cred *auth.AuthCredential
+	if flow.Provider == oauthProviderFeishu {
+		appCfg, errLoad := oauthLoadConfig(h.configPath)
+		if errLoad != nil {
+			h.setOAuthFlowError(flow.ID, errLoad.Error())
+			renderOAuthCallbackPage(w, flow.ID, oauthFlowError, "Config load failed", errLoad.Error())
+			return
+		}
+		appID := strings.TrimSpace(appCfg.Channels.Feishu.AppID)
+		appSecret := strings.TrimSpace(appCfg.Channels.Feishu.AppSecret)
+		cred, err = oauthExchangeFeishuCode(appID, appSecret, code, flow.CodeVerifier, flow.RedirectURI)
+	} else {
+		cred, err = oauthExchangeCodeForTokens(cfg, code, flow.CodeVerifier, flow.RedirectURI)
+	}
+
 	if err != nil {
 		h.setOAuthFlowError(flow.ID, fmt.Sprintf("token exchange failed: %v", err))
 		renderOAuthCallbackPage(w, flow.ID, oauthFlowError, "Token exchange failed", err.Error())
@@ -474,7 +517,7 @@ func (h *Handler) handleOAuthLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := oauthDeleteCredential(provider); err != nil {
+	if err := oauthDeleteCredential(providerMapped(provider)); err != nil {
 		http.Error(w, fmt.Sprintf("failed to delete credential: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -527,7 +570,7 @@ func normalizeOAuthProvider(raw string) (string, error) {
 	switch provider {
 	case "antigravity":
 		return oauthProviderGoogleAntigravity, nil
-	case oauthProviderOpenAI, oauthProviderAnthropic, oauthProviderGoogleAntigravity:
+	case oauthProviderOpenAI, oauthProviderAnthropic, oauthProviderGoogleAntigravity, oauthProviderFeishu:
 		return provider, nil
 	default:
 		return "", fmt.Errorf("unsupported provider %q", raw)
@@ -550,6 +593,8 @@ func oauthConfigForProvider(provider string) (auth.OAuthProviderConfig, error) {
 		return auth.OpenAIOAuthConfig(), nil
 	case oauthProviderGoogleAntigravity:
 		return auth.GoogleAntigravityOAuthConfig(), nil
+	case oauthProviderFeishu:
+		return auth.OAuthProviderConfig{}, nil
 	default:
 		return auth.OAuthProviderConfig{}, fmt.Errorf("provider %q does not support browser oauth", provider)
 	}
@@ -705,7 +750,7 @@ func (h *Handler) persistCredentialAndConfig(provider, authMethod string, cred *
 	}
 
 	cp := *cred
-	cp.Provider = provider
+	cp.Provider = providerMapped(provider)
 	if cp.AuthMethod == "" {
 		cp.AuthMethod = authMethod
 	}
@@ -729,7 +774,7 @@ func (h *Handler) persistCredentialAndConfig(provider, authMethod string, cred *
 		}
 	}
 
-	if err := oauthSetCredential(provider, &cp); err != nil {
+	if err := oauthSetCredential(providerMapped(provider), &cp); err != nil {
 		return fmt.Errorf("saving credential: %w", err)
 	}
 	if err := h.syncProviderAuthMethod(provider, authMethod); err != nil {
@@ -742,6 +787,11 @@ func (h *Handler) syncProviderAuthMethod(provider, authMethod string) error {
 	cfg, err := oauthLoadConfig(h.configPath)
 	if err != nil {
 		return err
+	}
+
+	if provider == oauthProviderFeishu {
+		// Feishu is credential-only: it should not mutate model_list or provider auth defaults.
+		return oauthSaveConfig(h.configPath, cfg)
 	}
 
 	switch provider {
@@ -807,6 +857,8 @@ func defaultModelConfigForProvider(provider, authMethod string) config.ModelConf
 			Model:      "antigravity/gemini-3-flash",
 			AuthMethod: authMethod,
 		}
+	case oauthProviderFeishu:
+		return config.ModelConfig{}
 	default:
 		return config.ModelConfig{}
 	}

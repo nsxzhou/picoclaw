@@ -1,4 +1,4 @@
-export type OAuthProvider = "openai" | "anthropic" | "google-antigravity"
+export type OAuthProvider = "openai" | "anthropic" | "google-antigravity" | "feishu"
 export type OAuthMethod = "browser" | "device_code" | "token"
 
 export interface OAuthProviderStatus {

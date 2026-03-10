@@ -82,6 +82,9 @@
       },
       "antigravity": {
         "description": "Uses browser OAuth for Google Cloud Code Assist."
+      },
+      "feishu": {
+        "description": "Uses browser OAuth for Feishu accounts and documentation."
       }
     },
     "status": {
@@ -107,6 +110,7 @@
     },
     "labels": {
       "account": "Account",
+      "accountId": "Account ID",
       "email": "Email",
       "project": "Project"
     },

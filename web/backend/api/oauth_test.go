@@ -218,6 +218,146 @@ func TestOAuthLogoutClearsCredentialAndConfig(t *testing.T) {
 	}
 }
 
+func TestSyncProviderAuthMethodFeishuDoesNotMutateModelList(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	cfgBefore, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig error: %v", err)
+	}
+	beforeLen := len(cfgBefore.ModelList)
+
+	h := NewHandler(configPath)
+	if err = h.syncProviderAuthMethod(oauthProviderFeishu, "oauth"); err != nil {
+		t.Fatalf("syncProviderAuthMethod error: %v", err)
+	}
+
+	cfgAfter, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig error: %v", err)
+	}
+	if len(cfgAfter.ModelList) != beforeLen {
+		t.Fatalf("model_list len = %d, want %d", len(cfgAfter.ModelList), beforeLen)
+	}
+	for i, m := range cfgAfter.ModelList {
+		if strings.TrimSpace(m.ModelName) == "" || strings.TrimSpace(m.Model) == "" {
+			t.Fatalf("model_list[%d] invalid after feishu sync: %#v", i, m)
+		}
+	}
+}
+
+func TestOAuthListProvidersUsesFeishuMappedCredential(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	err := auth.SetCredential(auth.FeishuCredentialProvider, &auth.AuthCredential{
+		AccessToken: "feishu-token",
+		Provider:    auth.FeishuCredentialProvider,
+		AuthMethod:  "oauth",
+		AccountID:   "ou_test",
+		Email:       "user@example.com",
+	})
+	if err != nil {
+		t.Fatalf("SetCredential error: %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/oauth/providers", nil)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Providers []oauthProviderStatus `json:"providers"`
+	}
+	if err = json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal providers response: %v", err)
+	}
+
+	var feishu *oauthProviderStatus
+	for i := range resp.Providers {
+		if resp.Providers[i].Provider == oauthProviderFeishu {
+			feishu = &resp.Providers[i]
+			break
+		}
+	}
+	if feishu == nil {
+		t.Fatalf("feishu provider not found in response: %#v", resp.Providers)
+	}
+	if !feishu.LoggedIn {
+		t.Fatal("expected feishu provider to be logged in")
+	}
+	if feishu.AccountID != "ou_test" {
+		t.Fatalf("account_id = %q, want %q", feishu.AccountID, "ou_test")
+	}
+	if feishu.Email != "user@example.com" {
+		t.Fatalf("email = %q, want %q", feishu.Email, "user@example.com")
+	}
+}
+
+func TestOAuthLogoutFeishuDeletesMappedCredentialWithoutModelMutation(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	err := auth.SetCredential(auth.FeishuCredentialProvider, &auth.AuthCredential{
+		AccessToken: "feishu-token",
+		Provider:    auth.FeishuCredentialProvider,
+		AuthMethod:  "oauth",
+	})
+	if err != nil {
+		t.Fatalf("SetCredential error: %v", err)
+	}
+
+	before, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig error: %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/oauth/logout", bytes.NewBufferString(`{"provider":"feishu"}`))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	cred, err := auth.GetCredential(auth.FeishuCredentialProvider)
+	if err != nil {
+		t.Fatalf("GetCredential error: %v", err)
+	}
+	if cred != nil {
+		t.Fatalf("expected feishu-user credential deleted, got %#v", cred)
+	}
+
+	after, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig error: %v", err)
+	}
+	if len(after.ModelList) != len(before.ModelList) {
+		t.Fatalf("model_list len = %d, want %d", len(after.ModelList), len(before.ModelList))
+	}
+	for i, m := range after.ModelList {
+		if strings.TrimSpace(m.ModelName) == "" || strings.TrimSpace(m.Model) == "" {
+			t.Fatalf("model_list[%d] invalid after feishu logout: %#v", i, m)
+		}
+	}
+}
+
 func setupOAuthTestEnv(t *testing.T) (string, func()) {
 	t.Helper()
 
@@ -273,6 +413,8 @@ func resetOAuthHooks(t *testing.T) {
 	origSaveConfig := oauthSaveConfig
 	origFetchProject := oauthFetchAntigravityProject
 	origFetchGoogleEmail := oauthFetchGoogleUserEmailFunc
+	origBuildFeishuAuthorizeURL := oauthBuildFeishuAuthorizeURL
+	origExchangeFeishuCode := oauthExchangeFeishuCode
 
 	t.Cleanup(func() {
 		oauthNow = origNow
@@ -289,5 +431,7 @@ func resetOAuthHooks(t *testing.T) {
 		oauthSaveConfig = origSaveConfig
 		oauthFetchAntigravityProject = origFetchProject
 		oauthFetchGoogleUserEmailFunc = origFetchGoogleEmail
+		oauthBuildFeishuAuthorizeURL = origBuildFeishuAuthorizeURL
+		oauthExchangeFeishuCode = origExchangeFeishuCode
 	})
 }
