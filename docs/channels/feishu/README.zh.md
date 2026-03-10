@@ -68,6 +68,10 @@
 说明：
 
 1. 该 sidecar 使用 `channels.feishu.app_id/app_secret` 鉴权。
-2. 写操作采用二次确认（先返回 `action_id`，再携带确认语重试）。
+2. 写操作采用二次确认（首次不带 `confirmation` 获取 `action_id`，二次必须携带 `action_id + confirmation` 执行）。
 3. 审计日志默认写入工作区 `state/feishu_doc_audit.jsonl`。
 4. MCP 工具名前缀示例：`mcp_feishu-doc_doc_read`。
+5. 新增归档相关工具：
+   - `doc_folder_create`：创建云空间文件夹（支持父级 `folder_token`）
+   - `doc_file_upload`：上传文件到云空间文件夹（适合作为 Markdown 回退归档）
+6. `doc_search` 支持 `folder_token` 过滤；当搜索接口在当前鉴权模式不可用时，会自动回退到 Drive 列表检索。
