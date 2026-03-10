@@ -106,6 +106,90 @@ func TestNormalizeUploadMIMEType(t *testing.T) {
 	}
 }
 
+func TestLooksLikeFeishuFileToken(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{name: "file url", input: "https://feishu.cn/file/boxcn123", want: true},
+		{name: "file prefix", input: "file/boxcn123", want: true},
+		{name: "docx url", input: "https://feishu.cn/docx/doccn123", want: false},
+		{name: "plain token", input: "boxcn123", want: false},
+		{name: "empty", input: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := looksLikeFeishuFileToken(tt.input)
+			if got != tt.want {
+				t.Fatalf("looksLikeFeishuFileToken(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsFeishuNotFoundError(t *testing.T) {
+	tests := []struct {
+		name    string
+		code    int
+		msg     string
+		callErr error
+		want    bool
+	}{
+		{name: "explicit code", code: 1770002, msg: "", callErr: nil, want: true},
+		{name: "english msg", code: 0, msg: "not found", callErr: nil, want: true},
+		{name: "chinese msg", code: 0, msg: "资源不存在", callErr: nil, want: true},
+		{name: "error text", code: 0, msg: "", callErr: errString("api error: code=1770002"), want: true},
+		{name: "other", code: 999, msg: "permission denied", callErr: nil, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isFeishuNotFoundError(tt.code, tt.msg, tt.callErr)
+			if got != tt.want {
+				t.Fatalf("isFeishuNotFoundError(%d, %q, %v) = %v, want %v", tt.code, tt.msg, tt.callErr, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShouldFallbackDocxToFile(t *testing.T) {
+	t.Run("unresolved docx meta with not found", func(t *testing.T) {
+		meta := &fileMeta{Type: feishuDocType, Resolved: false}
+		if !shouldFallbackDocxToFile("boxcn123", meta, 1770002, "not found", nil) {
+			t.Fatal("expected fallback for unresolved docx meta")
+		}
+	})
+
+	t.Run("resolved docx meta + explicit file token + not found", func(t *testing.T) {
+		meta := &fileMeta{Type: feishuDocType, Resolved: true}
+		if !shouldFallbackDocxToFile("file/boxcn123", meta, 1770002, "not found", nil) {
+			t.Fatal("expected fallback when token clearly points to file")
+		}
+	})
+
+	t.Run("resolved docx meta + plain token + not found", func(t *testing.T) {
+		meta := &fileMeta{Type: feishuDocType, Resolved: true}
+		if shouldFallbackDocxToFile("doccn123", meta, 1770002, "not found", nil) {
+			t.Fatal("did not expect fallback for resolved docx token")
+		}
+	})
+
+	t.Run("file type should not use docx fallback gate", func(t *testing.T) {
+		meta := &fileMeta{Type: feishuFileType, Resolved: true}
+		if shouldFallbackDocxToFile("file/boxcn123", meta, 1770002, "not found", nil) {
+			t.Fatal("did not expect fallback gate to run for non-docx meta type")
+		}
+	})
+}
+
+type errString string
+
+func (e errString) Error() string {
+	return string(e)
+}
+
 func strPtr(v string) *string {
 	return &v
 }

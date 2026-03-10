@@ -44,6 +44,7 @@ type fileMeta struct {
 	OwnerID          string
 	CreateTime       string
 	LatestModifyTime string
+	Resolved         bool
 }
 
 func (s *Server) selectAuthContext(meta invokeMeta) (*callAuthContext, error) {
@@ -214,6 +215,7 @@ func normalizeFileToken(raw string) string {
 
 	patterns := []string{
 		"/docx/",
+		"/file/",
 		"/docs/",
 		"/sheet/",
 		"/sheets/",
@@ -233,6 +235,7 @@ func normalizeFileToken(raw string) string {
 
 	prefixes := []string{
 		"docx/",
+		"file/",
 		"docs/",
 		"doc/",
 		"sheet/",
@@ -259,7 +262,21 @@ func (s *Server) resolveFileMeta(ctx context.Context, token string, authCtx *cal
 		return nil, errors.New("doc_token is required")
 	}
 
-	candidates := append([]string{feishuDocType}, supportedSearchTypes...)
+	// 中文注释：先尝试 docx，再尝试 file，其它类型按搜索支持列表兜底。
+	candidates := make([]string, 0, 2+len(supportedSearchTypes))
+	seen := make(map[string]struct{}, 2+len(supportedSearchTypes))
+	for _, candidate := range append([]string{feishuDocType, feishuFileType}, supportedSearchTypes...) {
+		candidate = strings.ToLower(strings.TrimSpace(candidate))
+		if candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		candidates = append(candidates, candidate)
+	}
+
 	for _, candidate := range candidates {
 		reqDoc := larkdrive.NewRequestDocBuilder().DocToken(token).DocType(candidate).Build()
 		metaReq := larkdrive.NewBatchQueryMetaReqBuilder().
@@ -286,8 +303,9 @@ func (s *Server) resolveFileMeta(ctx context.Context, token string, authCtx *cal
 			OwnerID:          strVal(meta.OwnerId),
 			CreateTime:       strVal(meta.CreateTime),
 			LatestModifyTime: strVal(meta.LatestModifyTime),
+			Resolved:         true,
 		}, nil
 	}
 
-	return &fileMeta{Token: token, Type: feishuDocType}, nil
+	return &fileMeta{Token: token, Type: feishuDocType, Resolved: false}, nil
 }

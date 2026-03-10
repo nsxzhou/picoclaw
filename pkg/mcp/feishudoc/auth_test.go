@@ -189,3 +189,27 @@ func TestSelectAuthContextRejectsBindingWithMissingScopes(t *testing.T) {
 		t.Fatalf("expected convert scope details, got %v", err)
 	}
 }
+
+func TestNormalizeFileToken(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "plain token", input: "boxcnAbc123", want: "boxcnAbc123"},
+		{name: "docx url", input: "https://feishu.cn/docx/doccnABCDEF?from=share", want: "doccnABCDEF"},
+		{name: "file url", input: "https://feishu.cn/file/boxcnFILE123?from=drive", want: "boxcnFILE123"},
+		{name: "file prefix", input: "file/boxcnFILE123", want: "boxcnFILE123"},
+		{name: "docx prefix", input: "docx/doccnABCDEF", want: "doccnABCDEF"},
+		{name: "empty", input: "", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeFileToken(tt.input)
+			if got != tt.want {
+				t.Fatalf("normalizeFileToken(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}

@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"hash/adler32"
+	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -18,6 +21,7 @@ import (
 	larksearch "github.com/larksuite/oapi-sdk-go/v3/service/search/v2"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/sipeed/picoclaw/pkg/attachments"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
@@ -38,6 +42,7 @@ const (
 	toolDocDelete        = "doc_delete"
 
 	feishuDocType            = "docx"
+	feishuFileType           = "file"
 	feishuFolderType         = "folder"
 	defaultConfirmTTL        = 5 * time.Minute
 	defaultSearchPageSize    = 100
@@ -476,6 +481,47 @@ func (s *Server) handleDocRead(
 		return errorTextResult(metaErr, authCtx), nil, nil
 	}
 
+	maxContent := clampInt(in.MaxContentChar, defaultMaxReadContentLen, 256, maxReadContentLen)
+
+	readAsFile := func(fallbackReason string) (*mcp.CallToolResult, any, error) {
+		fileOut, fileErr := s.buildDocReadFileResult(ctx, docToken, metaInfo, maxContent, authCtx, fallbackReason)
+		if fileErr != nil {
+			s.auditSafe(auditRecord{
+				Tool:               toolDocRead,
+				Channel:            meta.Channel,
+				ChatID:             meta.ChatID,
+				SenderID:           meta.SenderID,
+				Target:             metaInfo.Token,
+				Status:             "error",
+				AuthMode:           authCtx.Mode,
+				BoundIdentityMatch: authCtx.BoundIdentityMatch,
+				Error:              fileErr.Error(),
+				Details:            map[string]any{"type": feishuFileType},
+			})
+			return errorTextResult(fileErr, authCtx), nil, nil
+		}
+		s.auditSafe(auditRecord{
+			Tool:               toolDocRead,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Target:             metaInfo.Token,
+			Status:             "success",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
+			Details: map[string]any{
+				"type":              feishuFileType,
+				"content_status":    strMap(fileOut, "content_status"),
+				"fallback_from_doc": fallbackReason != "",
+			},
+		})
+		return textResult(fileOut), nil, nil
+	}
+
+	if metaInfo.Type == feishuFileType {
+		return readAsFile("")
+	}
+
 	if metaInfo.Type != feishuDocType {
 		out := attachCommonResultFields(map[string]any{
 			"doc_token":      metaInfo.Token,
@@ -487,7 +533,7 @@ func (s *Server) handleDocRead(
 			"created_time":   metaInfo.CreateTime,
 			"modified_time":  metaInfo.LatestModifyTime,
 			"content_status": "metadata_only",
-			"message":        "当前仅对 docx 提供完整内容读取，其他类型先返回元信息与能力说明。",
+			"message":        "当前仅对 docx 与 file 提供正文读取，其他类型先返回元信息与能力说明。",
 		}, authCtx)
 		s.auditSafe(auditRecord{
 			Tool:               toolDocRead,
@@ -510,6 +556,10 @@ func (s *Server) handleDocRead(
 		return errorTextResult(fmt.Errorf("get document failed: %w", err), authCtx), nil, nil
 	}
 	if !metaResp.Success() {
+		// 中文注释：当 docx 接口返回 not found（典型 code=1770002）时，尝试回退到 Drive 文件下载解析。
+		if shouldFallbackDocxToFile(in.DocToken, metaInfo, metaResp.Code, metaResp.Msg, nil) {
+			return readAsFile(fmt.Sprintf("docx metadata api not found: code=%d msg=%s", metaResp.Code, metaResp.Msg))
+		}
 		return errorTextResult(fmt.Errorf("get document api error: code=%d msg=%s", metaResp.Code, metaResp.Msg), authCtx), nil, nil
 	}
 
@@ -521,10 +571,12 @@ func (s *Server) handleDocRead(
 		return errorTextResult(fmt.Errorf("get raw content failed: %w", err), authCtx), nil, nil
 	}
 	if !rawResp.Success() {
+		if shouldFallbackDocxToFile(in.DocToken, metaInfo, rawResp.Code, rawResp.Msg, nil) {
+			return readAsFile(fmt.Sprintf("docx raw content api not found: code=%d msg=%s", rawResp.Code, rawResp.Msg))
+		}
 		return errorTextResult(fmt.Errorf("raw content api error: code=%d msg=%s", rawResp.Code, rawResp.Msg), authCtx), nil, nil
 	}
 
-	maxContent := clampInt(in.MaxContentChar, defaultMaxReadContentLen, 256, maxReadContentLen)
 	rawContent, rawTruncated := truncateText(strVal(rawResp.Data.Content), maxContent)
 
 	includeMarkdown := true
@@ -595,6 +647,187 @@ func (s *Server) handleDocRead(
 	})
 
 	return textResult(out), nil, nil
+}
+
+func (s *Server) buildDocReadFileResult(
+	ctx context.Context,
+	docToken string,
+	metaInfo *fileMeta,
+	maxContent int,
+	authCtx *callAuthContext,
+	fallbackReason string,
+) (map[string]any, error) {
+	token := docToken
+	if metaInfo != nil && strings.TrimSpace(metaInfo.Token) != "" {
+		token = strings.TrimSpace(metaInfo.Token)
+	}
+
+	fileResult, err := s.readDriveFileText(ctx, token, maxContent, authCtx)
+	if err != nil {
+		return nil, err
+	}
+
+	title := ""
+	if metaInfo != nil {
+		title = strings.TrimSpace(metaInfo.Title)
+	}
+	if title == "" {
+		title = strMap(fileResult, "file_name")
+	}
+
+	out := map[string]any{
+		"doc_token": token,
+		"token":     token,
+		"title":     title,
+		"type":      feishuFileType,
+	}
+	if metaInfo != nil {
+		out["url"] = metaInfo.URL
+		out["owner_id"] = metaInfo.OwnerID
+		out["created_time"] = metaInfo.CreateTime
+		out["modified_time"] = metaInfo.LatestModifyTime
+	}
+	for key, value := range fileResult {
+		out[key] = value
+	}
+	if fallbackReason != "" {
+		out["fallback_from"] = feishuDocType
+		out["fallback_reason"] = fallbackReason
+	}
+
+	return attachCommonResultFields(out, authCtx), nil
+}
+
+func (s *Server) readDriveFileText(
+	ctx context.Context,
+	docToken string,
+	maxContent int,
+	authCtx *callAuthContext,
+) (map[string]any, error) {
+	downloadResp, err := s.client.Drive.V1.File.Download(ctx, larkdrive.NewDownloadFileReqBuilder().
+		FileToken(docToken).
+		Build(), authCtx.RequestOptions...)
+	if err != nil {
+		return nil, fmt.Errorf("download file failed: %w", err)
+	}
+	if !downloadResp.Success() {
+		return nil, fmt.Errorf("download file api error: code=%d msg=%s", downloadResp.Code, downloadResp.Msg)
+	}
+	if downloadResp.File == nil {
+		return nil, errors.New("download file api returned empty content")
+	}
+
+	fileName := trimDefault(downloadResp.FileName, docToken)
+	mediaType := attachments.InferMediaTypeFromName(fileName)
+	tmpExt := filepath.Ext(fileName)
+
+	tmpFile, err := os.CreateTemp("", "picoclaw-feishu-doc-read-*"+tmpExt)
+	if err != nil {
+		return nil, fmt.Errorf("create temp file failed: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		_ = os.Remove(tmpPath)
+	}()
+	defer func() {
+		_ = tmpFile.Close()
+	}()
+	if closer, ok := downloadResp.File.(io.Closer); ok {
+		defer closer.Close()
+	}
+
+	sizeBytes, copyErr := io.Copy(tmpFile, downloadResp.File)
+	if copyErr != nil {
+		return nil, fmt.Errorf("write downloaded file failed: %w", copyErr)
+	}
+	if closeErr := tmpFile.Close(); closeErr != nil {
+		return nil, fmt.Errorf("flush downloaded file failed: %w", closeErr)
+	}
+
+	processor := attachments.NewProcessor(attachments.ProcessorOptions{
+		MaxTextChars: maxReadContentLen,
+	})
+	parsed, parseErrs := processor.Process([]string{tmpPath})
+
+	result := map[string]any{
+		"file_name":   fileName,
+		"media_type":  mediaType,
+		"size_bytes":  sizeBytes,
+		"parser_mode": "attachment_processor",
+	}
+	if len(parsed) > 0 {
+		attachment := parsed[0]
+		if strings.TrimSpace(attachment.MediaType) != "" {
+			result["media_type"] = strings.TrimSpace(attachment.MediaType)
+		}
+		if attachment.SizeBytes > 0 {
+			result["size_bytes"] = attachment.SizeBytes
+		}
+		text := strings.TrimSpace(attachment.TextContent)
+		if text != "" {
+			extractedText, truncated := truncateText(text, maxContent)
+			result["content_status"] = "ok"
+			result["extracted_text"] = extractedText
+			result["extracted_text_truncated"] = truncated
+			return result, nil
+		}
+	}
+
+	result["content_status"] = "metadata_only"
+	result["message"] = "文件下载成功，但当前无法提取可解析文本。"
+	result["extraction_error"] = "no_extractable_text"
+	if len(parseErrs) > 0 {
+		firstErr := parseErrs[0]
+		userMessage := strings.TrimSpace(firstErr.UserMessage)
+		if userMessage != "" {
+			result["message"] = userMessage
+			result["extraction_error"] = userMessage
+		}
+		if code := strings.TrimSpace(firstErr.Code); code != "" {
+			result["extraction_error_code"] = code
+		}
+		if reason := strings.TrimSpace(firstErr.Reason); reason != "" {
+			result["extraction_error_reason"] = reason
+		}
+	}
+
+	return result, nil
+}
+
+func shouldFallbackDocxToFile(rawToken string, metaInfo *fileMeta, apiCode int, apiMsg string, callErr error) bool {
+	if metaInfo == nil || metaInfo.Type != feishuDocType {
+		return false
+	}
+	if !isFeishuNotFoundError(apiCode, apiMsg, callErr) {
+		return false
+	}
+	if !metaInfo.Resolved {
+		return true
+	}
+	return looksLikeFeishuFileToken(rawToken)
+}
+
+func looksLikeFeishuFileToken(rawToken string) bool {
+	token := strings.ToLower(strings.TrimSpace(rawToken))
+	if token == "" {
+		return false
+	}
+	return strings.Contains(token, "/file/") || strings.HasPrefix(token, "file/")
+}
+
+func isFeishuNotFoundError(apiCode int, apiMsg string, callErr error) bool {
+	if apiCode == 1770002 {
+		return true
+	}
+	msg := strings.ToLower(strings.TrimSpace(apiMsg))
+	if strings.Contains(msg, "not found") || strings.Contains(msg, "不存在") {
+		return true
+	}
+	if callErr == nil {
+		return false
+	}
+	errText := strings.ToLower(callErr.Error())
+	return strings.Contains(errText, "1770002") || strings.Contains(errText, "not found") || strings.Contains(errText, "不存在")
 }
 
 func (s *Server) handleDocFolderCreate(
