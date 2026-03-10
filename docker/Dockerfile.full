@@ -21,13 +21,14 @@ RUN make build
 # ============================================================
 FROM node:24-alpine3.23
 
-# Install runtime dependencies
+# Install runtime dependencies (include tzdata so TZ=Asia/Shanghai takes effect)
 RUN apk add --no-cache \
   ca-certificates \
   curl \
   git \
   python3 \
-  py3-pip
+  py3-pip \
+  tzdata
 
 # Install uv and symlink to system path
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
