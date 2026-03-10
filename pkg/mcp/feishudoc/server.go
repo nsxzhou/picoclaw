@@ -1,10 +1,12 @@
 package feishudoc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/adler32"
 	"sort"
 	"strings"
 	"time"
@@ -26,6 +28,8 @@ const (
 
 	toolDocSearch        = "doc_search"
 	toolDocRead          = "doc_read"
+	toolDocFolderCreate  = "doc_folder_create"
+	toolDocFileUpload    = "doc_file_upload"
 	toolDocCreate        = "doc_create"
 	toolDocUpdate        = "doc_update"
 	toolDocComment       = "doc_comment"
@@ -34,6 +38,7 @@ const (
 	toolDocDelete        = "doc_delete"
 
 	feishuDocType            = "docx"
+	feishuFolderType         = "folder"
 	defaultConfirmTTL        = 5 * time.Minute
 	defaultSearchPageSize    = 100
 	maxSearchPageSize        = 200
@@ -86,6 +91,28 @@ type docCreateInput struct {
 	FolderToken  string `json:"folder_token,omitempty"`
 	Content      string `json:"content,omitempty"`
 	ContentType  string `json:"content_type,omitempty"`
+	ActionID     string `json:"action_id,omitempty"`
+	Confirmation string `json:"confirmation,omitempty"`
+	Channel      string `json:"__channel,omitempty"`
+	ChatID       string `json:"__chat_id,omitempty"`
+	SenderID     string `json:"__sender_id,omitempty"`
+}
+
+type docFolderCreateInput struct {
+	Name         string `json:"name"`
+	FolderToken  string `json:"folder_token,omitempty"`
+	ActionID     string `json:"action_id,omitempty"`
+	Confirmation string `json:"confirmation,omitempty"`
+	Channel      string `json:"__channel,omitempty"`
+	ChatID       string `json:"__chat_id,omitempty"`
+	SenderID     string `json:"__sender_id,omitempty"`
+}
+
+type docFileUploadInput struct {
+	FolderToken  string `json:"folder_token"`
+	FileName     string `json:"file_name"`
+	Content      string `json:"content"`
+	MIMEType     string `json:"mime_type,omitempty"`
 	ActionID     string `json:"action_id,omitempty"`
 	Confirmation string `json:"confirmation,omitempty"`
 	Channel      string `json:"__channel,omitempty"`
@@ -225,6 +252,18 @@ func (s *Server) Run(ctx context.Context) error {
 	}, s.handleDocRead)
 
 	mcp.AddTool(server, &mcp.Tool{
+		Name:        toolDocFolderCreate,
+		Description: "在飞书云空间创建文件夹。首次调用会返回 action_id，需二次确认后执行。",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(true)},
+	}, s.handleDocFolderCreate)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        toolDocFileUpload,
+		Description: "上传文件到飞书云空间文件夹（常用于 Markdown 归档回退）。首次调用会返回 action_id，需二次确认后执行。",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(true)},
+	}, s.handleDocFileUpload)
+
+	mcp.AddTool(server, &mcp.Tool{
 		Name:        toolDocCreate,
 		Description: "创建飞书 docx 文档，可选写入初始内容。首次调用会返回 action_id，需二次确认后执行。",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(true)},
@@ -285,21 +324,20 @@ func (s *Server) handleDocSearch(
 	}
 
 	pageSize := clampInt(in.PageSize, defaultSearchPageSize, 1, maxSearchPageSize)
+	folderToken := normalizeFolderToken(in.Folder)
+	if strings.TrimSpace(in.Folder) != "" && folderToken == "" {
+		return errorTextResult(errors.New("folder_token is invalid: provide folder token or drive folder URL"), authCtx), nil, nil
+	}
 	query := strings.TrimSpace(in.Query)
 	if query != "" {
-		docFilter := larksearch.NewDocFilterBuilder().DocTypes(supportedSearchTypes).Build()
-		wikiFilter := larksearch.NewWikiFilterBuilder().DocTypes(supportedSearchTypes).Build()
-		searchReq := larksearch.NewSearchDocWikiReqBuilder().
-			Body(larksearch.NewSearchDocWikiReqBodyBuilder().
-				Query(query).
-				DocFilter(docFilter).
-				WikiFilter(wikiFilter).
-				PageSize(pageSize).
-				PageToken(strings.TrimSpace(in.PageToken)).
-				Build()).
-			Build()
-
-		searchResp, searchErr := s.client.Search.V2.DocWiki.Search(ctx, searchReq, authCtx.RequestOptions...)
+		items, hasMore, nextPageToken, searchMode, searchErr := s.searchDocsWithFallback(
+			ctx,
+			query,
+			folderToken,
+			strings.TrimSpace(in.PageToken),
+			pageSize,
+			authCtx,
+		)
 		if searchErr != nil {
 			s.auditSafe(auditRecord{
 				Tool:               toolDocSearch,
@@ -311,53 +349,17 @@ func (s *Server) handleDocSearch(
 				BoundIdentityMatch: authCtx.BoundIdentityMatch,
 				Error:              searchErr.Error(),
 			})
-			return errorTextResult(fmt.Errorf("search docs failed: %w", searchErr), authCtx), nil, nil
-		}
-		if !searchResp.Success() {
-			err := fmt.Errorf("search docs api error: code=%d msg=%s", searchResp.Code, searchResp.Msg)
-			s.auditSafe(auditRecord{
-				Tool:               toolDocSearch,
-				Channel:            meta.Channel,
-				ChatID:             meta.ChatID,
-				SenderID:           meta.SenderID,
-				Status:             "error",
-				AuthMode:           authCtx.Mode,
-				BoundIdentityMatch: authCtx.BoundIdentityMatch,
-				Error:              err.Error(),
-			})
-			return errorTextResult(err, authCtx), nil, nil
+			return errorTextResult(searchErr, authCtx), nil, nil
 		}
 
-		items := make([]map[string]any, 0)
-		if searchResp.Data != nil {
-			for _, item := range searchResp.Data.ResUnits {
-				if mapped := docSearchResultToMap(item); len(mapped) > 0 {
-					items = append(items, mapped)
-				}
-			}
-		}
-		sort.Slice(items, func(i, j int) bool {
-			left := strings.ToLower(strMap(items[i], "name"))
-			right := strings.ToLower(strMap(items[j], "name"))
-			if left == right {
-				return strMap(items[i], "token") < strMap(items[j], "token")
-			}
-			return left < right
-		})
-
-		hasMore := false
-		nextPageToken := ""
-		if searchResp.Data != nil {
-			hasMore = boolVal(searchResp.Data.HasMore)
-			nextPageToken = strVal(searchResp.Data.PageToken)
-		}
 		result := attachCommonResultFields(map[string]any{
 			"query":           query,
-			"search_mode":     "search",
+			"search_mode":     searchMode,
 			"returned_count":  len(items),
 			"items":           items,
 			"has_more":        hasMore,
 			"next_page_token": nextPageToken,
+			"folder_token":    folderToken,
 		}, authCtx)
 		s.auditSafe(auditRecord{
 			Tool:               toolDocSearch,
@@ -367,37 +369,24 @@ func (s *Server) handleDocSearch(
 			Status:             "success",
 			AuthMode:           authCtx.Mode,
 			BoundIdentityMatch: authCtx.BoundIdentityMatch,
-			Details:            map[string]any{"query": query, "search_mode": "search", "returned_count": len(items)},
+			Details: map[string]any{
+				"query":          query,
+				"search_mode":    searchMode,
+				"returned_count": len(items),
+				"folder_token":   folderToken,
+			},
 		})
 		return textResult(result), nil, nil
 	}
 
-	req := larkdrive.NewListFileReqBuilder().PageSize(pageSize)
-	if strings.TrimSpace(in.PageToken) != "" {
-		req.PageToken(strings.TrimSpace(in.PageToken))
-	}
-	searchMode := "browse_root"
-	if strings.TrimSpace(in.Folder) != "" {
-		req.FolderToken(strings.TrimSpace(in.Folder))
-		searchMode = "browse_folder"
-	}
-
-	resp, err := s.client.Drive.V1.File.List(ctx, req.Build(), authCtx.RequestOptions...)
+	items, hasMore, nextPageToken, err := s.listDriveItems(
+		ctx,
+		folderToken,
+		strings.TrimSpace(in.PageToken),
+		pageSize,
+		authCtx,
+	)
 	if err != nil {
-		s.auditSafe(auditRecord{
-			Tool:               toolDocSearch,
-			Channel:            meta.Channel,
-			ChatID:             meta.ChatID,
-			SenderID:           meta.SenderID,
-			Status:             "error",
-			AuthMode:           authCtx.Mode,
-			BoundIdentityMatch: authCtx.BoundIdentityMatch,
-			Error:              err.Error(),
-		})
-		return errorTextResult(fmt.Errorf("browse docs failed: %w", err), authCtx), nil, nil
-	}
-	if !resp.Success() {
-		err := fmt.Errorf("browse docs api error: code=%d msg=%s", resp.Code, resp.Msg)
 		s.auditSafe(auditRecord{
 			Tool:               toolDocSearch,
 			Channel:            meta.Channel,
@@ -411,41 +400,19 @@ func (s *Server) handleDocSearch(
 		return errorTextResult(err, authCtx), nil, nil
 	}
 
-	items := make([]map[string]any, 0)
-	for _, f := range safeDriveFiles(resp.Data) {
-		name := strVal(f.Name)
-		token := strVal(f.Token)
-
-		items = append(items, map[string]any{
-			"doc_token":     token,
-			"token":         token,
-			"name":          name,
-			"title":         name,
-			"type":          strings.ToLower(strVal(f.Type)),
-			"url":           strVal(f.Url),
-			"parent_token":  strVal(f.ParentToken),
-			"owner_id":      strVal(f.OwnerId),
-			"created_time":  strVal(f.CreatedTime),
-			"modified_time": strVal(f.ModifiedTime),
-		})
+	searchMode := "browse_root"
+	if folderToken != "" {
+		searchMode = "browse_folder"
 	}
-
-	sort.Slice(items, func(i, j int) bool {
-		left := strings.ToLower(strMap(items[i], "name"))
-		right := strings.ToLower(strMap(items[j], "name"))
-		if left == right {
-			return strMap(items[i], "doc_token") < strMap(items[j], "doc_token")
-		}
-		return left < right
-	})
 
 	result := attachCommonResultFields(map[string]any{
 		"query":           "",
 		"search_mode":     searchMode,
 		"returned_count":  len(items),
 		"items":           items,
-		"has_more":        boolVal(resp.Data.HasMore),
-		"next_page_token": strVal(resp.Data.NextPageToken),
+		"has_more":        hasMore,
+		"next_page_token": nextPageToken,
+		"folder_token":    folderToken,
 	}, authCtx)
 
 	s.auditSafe(auditRecord{
@@ -456,7 +423,12 @@ func (s *Server) handleDocSearch(
 		Status:             "success",
 		AuthMode:           authCtx.Mode,
 		BoundIdentityMatch: authCtx.BoundIdentityMatch,
-		Details:            map[string]any{"query": "", "search_mode": searchMode, "returned_count": len(items)},
+		Details: map[string]any{
+			"query":          "",
+			"search_mode":    searchMode,
+			"returned_count": len(items),
+			"folder_token":   folderToken,
+		},
 	})
 
 	return textResult(result), nil, nil
@@ -625,6 +597,255 @@ func (s *Server) handleDocRead(
 	return textResult(out), nil, nil
 }
 
+func (s *Server) handleDocFolderCreate(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in docFolderCreateInput,
+) (*mcp.CallToolResult, any, error) {
+	name := strings.TrimSpace(in.Name)
+	if name == "" {
+		return errorTextResult(errors.New("name is required"), nil), nil, nil
+	}
+
+	meta := newInvokeMeta(in.Channel, in.ChatID, in.SenderID)
+	authCtx, err := s.selectAuthContext(meta)
+	if err != nil {
+		s.auditSafe(auditRecord{
+			Tool:               toolDocFolderCreate,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Status:             "error",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
+			Error:              err.Error(),
+		})
+		return errorTextResult(err, authCtx), nil, nil
+	}
+
+	parentFolderToken := normalizeFolderToken(in.FolderToken)
+	if strings.TrimSpace(in.FolderToken) != "" && parentFolderToken == "" {
+		return errorTextResult(errors.New("folder_token is invalid: provide folder token or drive folder URL"), authCtx), nil, nil
+	}
+
+	payload := map[string]any{
+		"name":         name,
+		"folder_token": parentFolderToken,
+	}
+	action, pendingResult := s.prepareWriteAction(
+		toolDocFolderCreate,
+		meta,
+		authCtx,
+		in.ActionID,
+		in.Confirmation,
+		payload,
+		fmt.Sprintf("创建文件夹《%s》", name),
+		parentFolderToken,
+	)
+	if pendingResult != nil {
+		return pendingResult, nil, nil
+	}
+
+	reqBody := larkdrive.NewCreateFolderFileReqBodyBuilder().Name(name)
+	if parentFolderToken != "" {
+		reqBody.FolderToken(parentFolderToken)
+	}
+
+	resp, createErr := s.client.Drive.V1.File.CreateFolder(ctx, larkdrive.NewCreateFolderFileReqBuilder().
+		Body(reqBody.Build()).
+		Build(), authCtx.RequestOptions...)
+	if createErr != nil {
+		return s.writeErrorWithAudit(toolDocFolderCreate, meta, authCtx, action, createErr), nil, nil
+	}
+	if !resp.Success() {
+		return s.writeErrorWithAudit(
+			toolDocFolderCreate,
+			meta,
+			authCtx,
+			action,
+			fmt.Errorf("create folder api error: code=%d msg=%s", resp.Code, resp.Msg),
+		), nil, nil
+	}
+
+	folderToken := strVal(resp.Data.Token)
+	if folderToken == "" {
+		return s.writeErrorWithAudit(
+			toolDocFolderCreate,
+			meta,
+			authCtx,
+			action,
+			errors.New("empty folder token returned by create folder api"),
+		), nil, nil
+	}
+
+	if action != nil {
+		s.confirmations.Consume(action.ID)
+	}
+
+	result := attachCommonResultFields(map[string]any{
+		"status":              "ok",
+		"folder_token":        folderToken,
+		"token":               folderToken,
+		"type":                feishuFolderType,
+		"name":                name,
+		"title":               name,
+		"url":                 strVal(resp.Data.Url),
+		"parent_folder_token": parentFolderToken,
+		"action_id":           actionIDOrEmpty(action),
+	}, authCtx)
+
+	s.auditSafe(auditRecord{
+		Tool:               toolDocFolderCreate,
+		ActionID:           actionIDOrEmpty(action),
+		Channel:            meta.Channel,
+		ChatID:             meta.ChatID,
+		SenderID:           meta.SenderID,
+		Target:             folderToken,
+		Status:             "success",
+		AuthMode:           authCtx.Mode,
+		BoundIdentityMatch: authCtx.BoundIdentityMatch,
+		Details: map[string]any{
+			"name":                name,
+			"parent_folder_token": parentFolderToken,
+		},
+	})
+
+	return textResult(result), nil, nil
+}
+
+func (s *Server) handleDocFileUpload(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in docFileUploadInput,
+) (*mcp.CallToolResult, any, error) {
+	rawFolderToken := strings.TrimSpace(in.FolderToken)
+	folderToken := normalizeFolderToken(in.FolderToken)
+	if rawFolderToken != "" && folderToken == "" {
+		return errorTextResult(errors.New("folder_token is invalid: provide folder token or drive folder URL"), nil), nil, nil
+	}
+	if folderToken == "" {
+		return errorTextResult(errors.New("folder_token is required"), nil), nil, nil
+	}
+	fileName := strings.TrimSpace(in.FileName)
+	if fileName == "" {
+		return errorTextResult(errors.New("file_name is required"), nil), nil, nil
+	}
+	if strings.TrimSpace(in.Content) == "" {
+		return errorTextResult(errors.New("content is required"), nil), nil, nil
+	}
+	mimeType := normalizeUploadMIMEType(in.MIMEType)
+
+	meta := newInvokeMeta(in.Channel, in.ChatID, in.SenderID)
+	authCtx, err := s.selectAuthContext(meta)
+	if err != nil {
+		s.auditSafe(auditRecord{
+			Tool:               toolDocFileUpload,
+			Channel:            meta.Channel,
+			ChatID:             meta.ChatID,
+			SenderID:           meta.SenderID,
+			Target:             folderToken,
+			Status:             "error",
+			AuthMode:           authCtx.Mode,
+			BoundIdentityMatch: authCtx.BoundIdentityMatch,
+			Error:              err.Error(),
+		})
+		return errorTextResult(err, authCtx), nil, nil
+	}
+
+	payload := map[string]any{
+		"folder_token": folderToken,
+		"file_name":    fileName,
+		"content":      in.Content,
+		"mime_type":    mimeType,
+	}
+	action, pendingResult := s.prepareWriteAction(
+		toolDocFileUpload,
+		meta,
+		authCtx,
+		in.ActionID,
+		in.Confirmation,
+		payload,
+		fmt.Sprintf("上传文件《%s》到文件夹 %s", fileName, folderToken),
+		folderToken,
+	)
+	if pendingResult != nil {
+		return pendingResult, nil, nil
+	}
+
+	contentBytes := []byte(in.Content)
+	checksum := fmt.Sprintf("%d", adler32.Checksum(contentBytes))
+	uploadReqBody := larkdrive.NewUploadAllFileReqBodyBuilder().
+		FileName(fileName).
+		ParentType(larkdrive.ParentTypeExplorer).
+		ParentNode(folderToken).
+		Size(len(contentBytes)).
+		Checksum(checksum).
+		File(bytes.NewReader(contentBytes))
+
+	uploadResp, uploadErr := s.client.Drive.V1.File.UploadAll(ctx, larkdrive.NewUploadAllFileReqBuilder().
+		Body(uploadReqBody.Build()).
+		Build(), authCtx.RequestOptions...)
+	if uploadErr != nil {
+		return s.writeErrorWithAudit(toolDocFileUpload, meta, authCtx, action, uploadErr), nil, nil
+	}
+	if !uploadResp.Success() {
+		return s.writeErrorWithAudit(
+			toolDocFileUpload,
+			meta,
+			authCtx,
+			action,
+			fmt.Errorf("upload file api error: code=%d msg=%s", uploadResp.Code, uploadResp.Msg),
+		), nil, nil
+	}
+
+	fileToken := strVal(uploadResp.Data.FileToken)
+	if fileToken == "" {
+		return s.writeErrorWithAudit(
+			toolDocFileUpload,
+			meta,
+			authCtx,
+			action,
+			errors.New("empty file token returned by upload api"),
+		), nil, nil
+	}
+
+	if action != nil {
+		s.confirmations.Consume(action.ID)
+	}
+
+	result := attachCommonResultFields(map[string]any{
+		"status":       "ok",
+		"file_token":   fileToken,
+		"token":        fileToken,
+		"type":         "file",
+		"file_name":    fileName,
+		"folder_token": folderToken,
+		"mime_type":    mimeType,
+		"size":         len(contentBytes),
+		"checksum":     checksum,
+		"action_id":    actionIDOrEmpty(action),
+	}, authCtx)
+
+	s.auditSafe(auditRecord{
+		Tool:               toolDocFileUpload,
+		ActionID:           actionIDOrEmpty(action),
+		Channel:            meta.Channel,
+		ChatID:             meta.ChatID,
+		SenderID:           meta.SenderID,
+		Target:             fileToken,
+		Status:             "success",
+		AuthMode:           authCtx.Mode,
+		BoundIdentityMatch: authCtx.BoundIdentityMatch,
+		Details: map[string]any{
+			"file_name":    fileName,
+			"folder_token": folderToken,
+			"size":         len(contentBytes),
+		},
+	})
+
+	return textResult(result), nil, nil
+}
+
 func (s *Server) handleDocCreate(
 	ctx context.Context,
 	_ *mcp.CallToolRequest,
@@ -655,9 +876,13 @@ func (s *Server) handleDocCreate(
 		})
 		return errorTextResult(err, authCtx), nil, nil
 	}
+	folderToken := normalizeFolderToken(in.FolderToken)
+	if strings.TrimSpace(in.FolderToken) != "" && folderToken == "" {
+		return errorTextResult(errors.New("folder_token is invalid: provide folder token or drive folder URL"), authCtx), nil, nil
+	}
 	payload := map[string]any{
 		"title":        title,
-		"folder_token": strings.TrimSpace(in.FolderToken),
+		"folder_token": folderToken,
 		"content":      in.Content,
 		"content_type": contentType,
 	}
@@ -682,8 +907,8 @@ func (s *Server) handleDocCreate(
 	}
 
 	createReqBody := larkdocx.NewCreateDocumentReqBodyBuilder().Title(title)
-	if strings.TrimSpace(in.FolderToken) != "" {
-		createReqBody.FolderToken(strings.TrimSpace(in.FolderToken))
+	if folderToken != "" {
+		createReqBody.FolderToken(folderToken)
 	}
 	createResp, createErr := s.client.Docx.V1.Document.Create(ctx, larkdocx.NewCreateDocumentReqBuilder().
 		Body(createReqBody.Build()).
@@ -1463,6 +1688,154 @@ func (s *Server) handleDocDelete(
 	return textResult(result), nil, nil
 }
 
+func (s *Server) searchDocsWithFallback(
+	ctx context.Context,
+	query string,
+	folderToken string,
+	pageToken string,
+	pageSize int,
+	authCtx *callAuthContext,
+) ([]map[string]any, bool, string, string, error) {
+	docFilterBuilder := larksearch.NewDocFilterBuilder().DocTypes(supportedSearchTypes)
+	if folderToken != "" {
+		docFilterBuilder.FolderTokens([]string{folderToken})
+	}
+	docFilter := docFilterBuilder.Build()
+	wikiFilter := larksearch.NewWikiFilterBuilder().DocTypes(supportedSearchTypes).Build()
+	searchReq := larksearch.NewSearchDocWikiReqBuilder().
+		Body(larksearch.NewSearchDocWikiReqBodyBuilder().
+			Query(query).
+			DocFilter(docFilter).
+			WikiFilter(wikiFilter).
+			PageSize(pageSize).
+			PageToken(pageToken).
+			Build()).
+		Build()
+
+	searchResp, searchErr := s.client.Search.V2.DocWiki.Search(ctx, searchReq, authCtx.RequestOptions...)
+	if searchErr == nil && searchResp.Success() {
+		items := make([]map[string]any, 0)
+		if searchResp.Data != nil {
+			for _, item := range searchResp.Data.ResUnits {
+				if mapped := docSearchResultToMap(item); len(mapped) > 0 {
+					items = append(items, mapped)
+				}
+			}
+		}
+		sortByNameAndToken(items)
+		hasMore := false
+		nextPageToken := ""
+		if searchResp.Data != nil {
+			hasMore = boolVal(searchResp.Data.HasMore)
+			nextPageToken = strVal(searchResp.Data.PageToken)
+		}
+		return items, hasMore, nextPageToken, "search", nil
+	}
+
+	var primaryErr error
+	if searchErr != nil {
+		primaryErr = fmt.Errorf("search docs failed: %w", searchErr)
+	} else {
+		primaryErr = fmt.Errorf("search docs api error: code=%d msg=%s", searchResp.Code, searchResp.Msg)
+	}
+
+	// 中文注释：搜索接口在应用态会失败，这里回退到 Drive 列表并做本地关键词过滤，保证可用性。
+	listItems, hasMore, nextPageToken, listErr := s.listDriveItems(ctx, folderToken, pageToken, pageSize, authCtx)
+	if listErr != nil {
+		return nil, false, "", "", fmt.Errorf("%v; drive fallback failed: %w", primaryErr, listErr)
+	}
+
+	return filterDriveItemsByQuery(listItems, query), hasMore, nextPageToken, "search_drive_fallback", nil
+}
+
+func (s *Server) listDriveItems(
+	ctx context.Context,
+	folderToken string,
+	pageToken string,
+	pageSize int,
+	authCtx *callAuthContext,
+) ([]map[string]any, bool, string, error) {
+	req := larkdrive.NewListFileReqBuilder().PageSize(pageSize)
+	if pageToken != "" {
+		req.PageToken(pageToken)
+	}
+	if folderToken != "" {
+		req.FolderToken(folderToken)
+	}
+
+	resp, err := s.client.Drive.V1.File.List(ctx, req.Build(), authCtx.RequestOptions...)
+	if err != nil {
+		return nil, false, "", fmt.Errorf("browse docs failed: %w", err)
+	}
+	if !resp.Success() {
+		return nil, false, "", fmt.Errorf("browse docs api error: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+
+	items := make([]map[string]any, 0)
+	for _, f := range safeDriveFiles(resp.Data) {
+		items = append(items, driveFileToMap(f))
+	}
+	sortByNameAndToken(items)
+	return items, boolVal(resp.Data.HasMore), strVal(resp.Data.NextPageToken), nil
+}
+
+func driveFileToMap(f *larkdrive.File) map[string]any {
+	if f == nil {
+		return map[string]any{}
+	}
+
+	name := strVal(f.Name)
+	token := strVal(f.Token)
+	return map[string]any{
+		"doc_token":     token,
+		"token":         token,
+		"name":          name,
+		"title":         name,
+		"type":          strings.ToLower(strVal(f.Type)),
+		"url":           strVal(f.Url),
+		"parent_token":  strVal(f.ParentToken),
+		"owner_id":      strVal(f.OwnerId),
+		"created_time":  strVal(f.CreatedTime),
+		"modified_time": strVal(f.ModifiedTime),
+	}
+}
+
+func filterDriveItemsByQuery(items []map[string]any, query string) []map[string]any {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" || len(items) == 0 {
+		return items
+	}
+
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		candidates := []string{
+			strings.ToLower(strMap(item, "name")),
+			strings.ToLower(strMap(item, "title")),
+			strings.ToLower(strMap(item, "token")),
+			strings.ToLower(strMap(item, "doc_token")),
+			strings.ToLower(strMap(item, "type")),
+		}
+		for _, candidate := range candidates {
+			if candidate != "" && strings.Contains(candidate, query) {
+				out = append(out, item)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func sortByNameAndToken(items []map[string]any) {
+	sort.Slice(items, func(i, j int) bool {
+		left := strings.ToLower(strMap(items[i], "name"))
+		right := strings.ToLower(strMap(items[j], "name"))
+		if left == right {
+			return strMap(items[i], "token") < strMap(items[j], "token")
+		}
+		return left < right
+	})
+}
+
 func (s *Server) listBlockSummaries(
 	ctx context.Context,
 	docToken string,
@@ -1845,6 +2218,36 @@ func safeDriveFiles(data *larkdrive.ListFileRespData) []*larkdrive.File {
 	return data.Files
 }
 
+func normalizeFolderToken(raw string) string {
+	token := strings.TrimSpace(raw)
+	if token == "" {
+		return ""
+	}
+
+	patterns := []string{
+		"/drive/folder/",
+		"/folder/",
+	}
+	for _, pattern := range patterns {
+		if idx := strings.Index(token, pattern); idx >= 0 {
+			token = token[idx+len(pattern):]
+			break
+		}
+	}
+
+	// 支持从带 query 的分享链接里提取 folder_token=xxx。
+	if idx := strings.Index(token, "folder_token="); idx >= 0 {
+		token = token[idx+len("folder_token="):]
+	}
+
+	token = strings.TrimPrefix(token, "folder/")
+	token = strings.TrimPrefix(token, "drive/folder/")
+	if cut := strings.IndexAny(token, "?#/&"); cut >= 0 {
+		token = token[:cut]
+	}
+	return strings.TrimSpace(token)
+}
+
 func normalizeDocToken(raw string) string {
 	token := strings.TrimSpace(raw)
 	if token == "" {
@@ -1872,6 +2275,14 @@ func normalizeContentType(contentType string) (string, error) {
 		return ct, nil
 	}
 	return "", errors.New("content_type must be one of: markdown, html")
+}
+
+func normalizeUploadMIMEType(raw string) string {
+	mimeType := strings.TrimSpace(raw)
+	if mimeType == "" {
+		return "text/markdown; charset=utf-8"
+	}
+	return mimeType
 }
 
 func textResult(payload any) *mcp.CallToolResult {
