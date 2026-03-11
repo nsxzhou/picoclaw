@@ -12,9 +12,11 @@ import (
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
+const cronDelegationRebuildHint = "该定时任务缺少可验证的用户委托身份，请在当前会话中重新创建该定时任务后重试。"
+
 // JobExecutor is the interface for executing cron jobs through the agent
 type JobExecutor interface {
-	ProcessDirectWithChannel(ctx context.Context, content, sessionKey, channel, chatID string) (string, error)
+	ProcessDirectWithChannel(ctx context.Context, content, sessionKey, channel, chatID, senderID string) (string, error)
 }
 
 // CronTool provides scheduling capabilities for the agent
@@ -124,6 +126,7 @@ func (t *CronTool) Execute(ctx context.Context, args map[string]any) *ToolResult
 func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult {
 	channel := ToolChannel(ctx)
 	chatID := ToolChatID(ctx)
+	senderID := strings.TrimSpace(ToolSenderID(ctx))
 
 	if channel == "" || chatID == "" {
 		return ErrorResult("no session context (channel/chat_id not set). Use this tool in an active conversation.")
@@ -201,8 +204,19 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 
 	if command != "" {
 		job.Payload.Command = command
-		// Need to save the updated payload
-		t.cronService.UpdateJob(job)
+	}
+	if senderID != "" {
+		// 中文注释：记录创建任务的原始 sender，用于后续执行时恢复用户态身份。
+		job.Payload.SenderID = senderID
+		delegation, signErr := t.cronService.SignDelegation(job.ID, channel, chatID, senderID, time.Now())
+		if signErr != nil {
+			_ = t.cronService.RemoveJob(job.ID)
+			return ErrorResult(fmt.Sprintf("Error binding cron delegation: %v", signErr))
+		}
+		job.Payload.Delegation = delegation
+	}
+	if err := t.cronService.UpdateJob(job); err != nil {
+		return ErrorResult(fmt.Sprintf("Error updating job payload: %v", err))
 	}
 
 	return SilentResult(fmt.Sprintf("Cron job added: %s (id: %s)", job.Name, job.ID))
@@ -316,6 +330,10 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 
 	// For deliver=false, process through agent (for complex tasks)
 	sessionKey := fmt.Sprintf("cron-%s", job.ID)
+	effectiveSenderID, delegationErr := t.resolveDelegatedSender(job, channel, chatID)
+	if delegationErr != nil {
+		return fmt.Sprintf("Error: %v", delegationErr)
+	}
 
 	// Call agent with job's message
 	response, err := t.executor.ProcessDirectWithChannel(
@@ -324,6 +342,7 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 		sessionKey,
 		channel,
 		chatID,
+		effectiveSenderID,
 	)
 	if err != nil {
 		return fmt.Sprintf("Error: %v", err)
@@ -332,4 +351,22 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 	// Response is automatically sent via MessageBus by AgentLoop
 	_ = response // Will be sent by AgentLoop
 	return "ok"
+}
+
+func (t *CronTool) resolveDelegatedSender(job *cron.CronJob, channel, chatID string) (string, error) {
+	delegation := job.Payload.Delegation
+	if delegation == nil {
+		return "", fmt.Errorf("%s（job_id=%s）", cronDelegationRebuildHint, job.ID)
+	}
+
+	if err := t.cronService.ValidateDelegation(delegation, job.ID, channel, chatID); err != nil {
+		return "", fmt.Errorf("%s（job_id=%s, reason=%v）", cronDelegationRebuildHint, job.ID, err)
+	}
+
+	// 优先使用签名体里的 sender_id，避免被未签名字段篡改。
+	effective := strings.TrimSpace(delegation.SenderID)
+	if effective == "" {
+		return "", fmt.Errorf("%s（job_id=%s, reason=delegation sender_id empty）", cronDelegationRebuildHint, job.ID)
+	}
+	return effective, nil
 }

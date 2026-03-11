@@ -1004,6 +1004,7 @@ func TestAgentLoop_ContextExhaustionRetry(t *testing.T) {
 		sessionKey,
 		"test",
 		"test-chat",
+		"cron",
 	)
 	if err != nil {
 		t.Fatalf("Expected success after retry, got error: %v", err)

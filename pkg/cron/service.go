@@ -24,12 +24,14 @@ type CronSchedule struct {
 }
 
 type CronPayload struct {
-	Kind    string `json:"kind"`
-	Message string `json:"message"`
-	Command string `json:"command,omitempty"`
-	Deliver bool   `json:"deliver"`
-	Channel string `json:"channel,omitempty"`
-	To      string `json:"to,omitempty"`
+	Kind       string          `json:"kind"`
+	Message    string          `json:"message"`
+	Command    string          `json:"command,omitempty"`
+	Deliver    bool            `json:"deliver"`
+	Channel    string          `json:"channel,omitempty"`
+	To         string          `json:"to,omitempty"`
+	SenderID   string          `json:"sender_id,omitempty"`
+	Delegation *CronDelegation `json:"delegation,omitempty"`
 }
 
 type CronJobState struct {
@@ -59,13 +61,15 @@ type CronStore struct {
 type JobHandler func(job *CronJob) (string, error)
 
 type CronService struct {
-	storePath string
-	store     *CronStore
-	onJob     JobHandler
-	mu        sync.RWMutex
-	running   bool
-	stopChan  chan struct{}
-	gronx     *gronx.Gronx
+	storePath       string
+	store           *CronStore
+	onJob           JobHandler
+	mu              sync.RWMutex
+	running         bool
+	stopChan        chan struct{}
+	gronx           *gronx.Gronx
+	delegationKey   []byte
+	delegationKeyMu sync.Mutex
 }
 
 func NewCronService(storePath string, onJob JobHandler) *CronService {

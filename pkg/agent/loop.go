@@ -565,16 +565,21 @@ func (al *AgentLoop) ProcessDirect(
 	ctx context.Context,
 	content, sessionKey string,
 ) (string, error) {
-	return al.ProcessDirectWithChannel(ctx, content, sessionKey, "cli", "direct")
+	return al.ProcessDirectWithChannel(ctx, content, sessionKey, "cli", "direct", "cron")
 }
 
 func (al *AgentLoop) ProcessDirectWithChannel(
 	ctx context.Context,
-	content, sessionKey, channel, chatID string,
+	content, sessionKey, channel, chatID, senderID string,
 ) (string, error) {
+	senderID = strings.TrimSpace(senderID)
+	if senderID == "" {
+		senderID = "cron"
+	}
+
 	msg := bus.InboundMessage{
 		Channel:    channel,
-		SenderID:   "cron",
+		SenderID:   senderID,
 		ChatID:     chatID,
 		Content:    content,
 		SessionKey: sessionKey,
@@ -1267,6 +1272,7 @@ func (al *AgentLoop) runLLMIteration(
 					toolArgs,
 					opts.Channel,
 					opts.ChatID,
+					opts.SenderID,
 					asyncCallback,
 				)
 				agentResults[idx].result = toolResult

@@ -23,12 +23,18 @@ type toolCtxKey struct{ name string }
 var (
 	ctxKeyChannel = &toolCtxKey{"channel"}
 	ctxKeyChatID  = &toolCtxKey{"chatID"}
+	ctxKeySender  = &toolCtxKey{"senderID"}
 )
 
 // WithToolContext returns a child context carrying channel and chatID.
 func WithToolContext(ctx context.Context, channel, chatID string) context.Context {
+	// Preserve sender_id if caller already attached it (for delegated execution).
+	senderID := ToolSenderID(ctx)
 	ctx = context.WithValue(ctx, ctxKeyChannel, channel)
 	ctx = context.WithValue(ctx, ctxKeyChatID, chatID)
+	if senderID != "" {
+		ctx = context.WithValue(ctx, ctxKeySender, senderID)
+	}
 	return ctx
 }
 
@@ -41,6 +47,17 @@ func ToolChannel(ctx context.Context) string {
 // ToolChatID extracts the chatID from ctx, or "" if unset.
 func ToolChatID(ctx context.Context) string {
 	v, _ := ctx.Value(ctxKeyChatID).(string)
+	return v
+}
+
+// WithToolSender returns a child context carrying senderID.
+func WithToolSender(ctx context.Context, senderID string) context.Context {
+	return context.WithValue(ctx, ctxKeySender, senderID)
+}
+
+// ToolSenderID extracts the senderID from ctx, or "" if unset.
+func ToolSenderID(ctx context.Context) string {
+	v, _ := ctx.Value(ctxKeySender).(string)
 	return v
 }
 

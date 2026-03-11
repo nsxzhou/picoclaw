@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 func TestSaveStore_FilePermissions(t *testing.T) {
@@ -35,4 +36,47 @@ func TestSaveStore_FilePermissions(t *testing.T) {
 
 func int64Ptr(v int64) *int64 {
 	return &v
+}
+
+func TestCronDelegationSignAndValidate(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "cron", "jobs.json")
+	cs := NewCronService(storePath, nil)
+
+	const (
+		jobID    = "job-1"
+		channel  = "feishu"
+		chatID   = "oc_123"
+		senderID = "feishu:ou_456"
+	)
+
+	delegation, err := cs.SignDelegation(jobID, channel, chatID, senderID, time.Unix(100, 0))
+	if err != nil {
+		t.Fatalf("SignDelegation failed: %v", err)
+	}
+	if delegation == nil {
+		t.Fatal("expected delegation to be non-nil")
+	}
+	if delegation.SenderID != senderID {
+		t.Fatalf("delegation sender_id = %q, want %q", delegation.SenderID, senderID)
+	}
+
+	if err := cs.ValidateDelegation(delegation, jobID, channel, chatID); err != nil {
+		t.Fatalf("ValidateDelegation failed: %v", err)
+	}
+}
+
+func TestCronDelegationValidateRejectsTamperedClaims(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "cron", "jobs.json")
+	cs := NewCronService(storePath, nil)
+
+	delegation, err := cs.SignDelegation("job-1", "feishu", "oc_123", "feishu:ou_456", time.Unix(100, 0))
+	if err != nil {
+		t.Fatalf("SignDelegation failed: %v", err)
+	}
+
+	if err := cs.ValidateDelegation(delegation, "job-1", "feishu", "oc_999"); err == nil {
+		t.Fatal("expected ValidateDelegation to fail after claims tampering")
+	}
 }

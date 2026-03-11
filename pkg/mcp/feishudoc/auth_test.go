@@ -125,6 +125,49 @@ func TestSelectAuthContextRejectsMismatchedSender(t *testing.T) {
 	}
 }
 
+func TestSelectAuthContextRejectsSystemSenderWithoutDelegation(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("PICOCLAW_HOME", tempHome)
+
+	if err := auth.SetCredential(auth.FeishuCredentialProvider, &auth.AuthCredential{
+		Provider:    auth.FeishuCredentialProvider,
+		AuthMethod:  "oauth",
+		AccessToken: "user-token",
+		UserID:      "u_bound",
+		Scope:       auth.RequiredFeishuScopes(),
+	}); err != nil {
+		t.Fatalf("save credential: %v", err)
+	}
+
+	srv := &Server{appID: "app-id", appSecret: "app-secret"}
+	authCtx, err := srv.selectAuthContext(newInvokeMeta("feishu", "chat-1", "cron"))
+	if !errors.Is(err, errSystemSenderNeedsDelegation) {
+		t.Fatalf("expected errSystemSenderNeedsDelegation, got %v", err)
+	}
+	if authCtx == nil {
+		t.Fatal("expected auth context on mismatch")
+	}
+	if authCtx.Mode != authModeUser {
+		t.Fatalf("expected user mode on mismatch, got %s", authCtx.Mode)
+	}
+	if authCtx.BoundIdentityMatch == nil || *authCtx.BoundIdentityMatch {
+		t.Fatal("expected bound identity match to be false")
+	}
+}
+
+func TestIsSystemSenderIdentity(t *testing.T) {
+	for _, senderID := range []string{"", "cron", "system", "async:spawn", "ASYNC:tool"} {
+		if !isSystemSenderIdentity(senderID) {
+			t.Fatalf("expected %q to be system sender", senderID)
+		}
+	}
+	for _, senderID := range []string{"feishu:ou_1", "ou_1", "user-123"} {
+		if isSystemSenderIdentity(senderID) {
+			t.Fatalf("expected %q not to be system sender", senderID)
+		}
+	}
+}
+
 func TestSelectAuthContextLoadsCredentialFromProviderKeyedStore(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("PICOCLAW_HOME", tempHome)

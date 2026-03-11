@@ -16,6 +16,7 @@ type SubagentTask struct {
 	AgentID       string
 	OriginChannel string
 	OriginChatID  string
+	OriginSender  string
 	Status        string
 	Result        string
 	Created       int64
@@ -78,7 +79,7 @@ func (sm *SubagentManager) RegisterTool(tool Tool) {
 
 func (sm *SubagentManager) Spawn(
 	ctx context.Context,
-	task, label, agentID, originChannel, originChatID string,
+	task, label, agentID, originChannel, originChatID, originSender string,
 	callback AsyncCallback,
 ) (string, error) {
 	sm.mu.Lock()
@@ -94,6 +95,7 @@ func (sm *SubagentManager) Spawn(
 		AgentID:       agentID,
 		OriginChannel: originChannel,
 		OriginChatID:  originChatID,
+		OriginSender:  originSender,
 		Status:        "running",
 		Created:       time.Now().UnixMilli(),
 	}
@@ -166,7 +168,7 @@ After completing the task, provide a clear summary of what was done.`
 		Tools:         tools,
 		MaxIterations: maxIter,
 		LLMOptions:    llmOptions,
-	}, messages, task.OriginChannel, task.OriginChatID)
+	}, messages, task.OriginChannel, task.OriginChatID, task.OriginSender)
 
 	sm.mu.Lock()
 	var result *ToolResult
@@ -331,7 +333,7 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 		Tools:         tools,
 		MaxIterations: maxIter,
 		LLMOptions:    llmOptions,
-	}, messages, channel, chatID)
+	}, messages, channel, chatID, ToolSenderID(ctx))
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("Subagent execution failed: %v", err)).WithError(err)
 	}

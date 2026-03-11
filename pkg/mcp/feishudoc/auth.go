@@ -25,8 +25,9 @@ const (
 )
 
 var (
-	errBoundToAnotherUser = errors.New("该实例已绑定到另一位飞书用户")
-	supportedSearchTypes  = []string{"docx", "doc", "sheet", "slides", "bitable", "wiki", "mindnote"}
+	errBoundToAnotherUser          = errors.New("该实例已绑定到另一位飞书用户")
+	errSystemSenderNeedsDelegation = errors.New("当前请求来自系统定时/异步触发，缺少用户委托身份。请在用户会话中重新创建定时任务后重试")
+	supportedSearchTypes           = []string{"docx", "doc", "sheet", "slides", "bitable", "wiki", "mindnote"}
 )
 
 type callAuthContext struct {
@@ -82,6 +83,13 @@ func (s *Server) selectAuthContext(meta invokeMeta) (*callAuthContext, error) {
 
 	match := senderMatchesBoundIdentity(ctx.SenderRawID, cred)
 	if !match {
+		if isSystemSenderIdentity(ctx.SenderRawID) {
+			return &callAuthContext{
+				Mode:               authModeUser,
+				BoundIdentityMatch: boolPtr(false),
+				SenderRawID:        ctx.SenderRawID,
+			}, errSystemSenderNeedsDelegation
+		}
 		return &callAuthContext{
 			Mode:               authModeUser,
 			BoundIdentityMatch: boolPtr(false),
@@ -134,6 +142,22 @@ func senderMatchesBoundIdentity(senderID string, cred *auth.AuthCredential) bool
 		if strings.TrimSpace(candidate) != "" && senderID == strings.TrimSpace(candidate) {
 			return true
 		}
+	}
+	return false
+}
+
+func isSystemSenderIdentity(senderID string) bool {
+	senderID = strings.TrimSpace(senderID)
+	if senderID == "" {
+		return true
+	}
+
+	lowered := strings.ToLower(senderID)
+	if lowered == "cron" || lowered == "system" {
+		return true
+	}
+	if strings.HasPrefix(lowered, "async:") {
+		return true
 	}
 	return false
 }
