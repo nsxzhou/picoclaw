@@ -2,11 +2,13 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal"
@@ -248,9 +250,18 @@ func setupCronTool(
 	if cronTool != nil {
 		cronService.SetOnJob(func(job *cron.CronJob) (string, error) {
 			result := cronTool.ExecuteJob(context.Background(), job)
-			return result, nil
+			return result, cronExecuteResultError(result)
 		})
 	}
 
 	return cronService
+}
+
+func cronExecuteResultError(result string) error {
+	trimmed := strings.TrimSpace(result)
+	// 中文注释：CronTool 约定用 "Error:" 前缀传递失败原因，这里转成 error 供调度器记录状态。
+	if strings.HasPrefix(strings.ToLower(trimmed), "error:") {
+		return errors.New(trimmed)
+	}
+	return nil
 }
