@@ -297,6 +297,47 @@ func TestAgentLoop_Stop(t *testing.T) {
 	}
 }
 
+func TestResolveScopeKey(t *testing.T) {
+	route := routing.ResolvedRoute{
+		SessionKey: "agent:main:main",
+	}
+
+	tests := []struct {
+		name       string
+		msgKey     string
+		wantResult string
+	}{
+		{
+			name:       "preserve explicit agent-scoped session key",
+			msgKey:     "agent:worker:main",
+			wantResult: "agent:worker:main",
+		},
+		{
+			name:       "preserve explicit cron session key",
+			msgKey:     "cron-job-123",
+			wantResult: "cron-job-123",
+		},
+		{
+			name:       "fallback to route session when empty",
+			msgKey:     "",
+			wantResult: "agent:main:main",
+		},
+		{
+			name:       "fallback to route session for unknown prefix",
+			msgKey:     "custom-session",
+			wantResult: "agent:main:main",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveScopeKey(route, tc.msgKey); got != tc.wantResult {
+				t.Fatalf("resolveScopeKey(%q) = %q, want %q", tc.msgKey, got, tc.wantResult)
+			}
+		})
+	}
+}
+
 // Mock implementations for testing
 
 type simpleMockProvider struct {

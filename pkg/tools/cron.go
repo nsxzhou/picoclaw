@@ -14,15 +14,9 @@ import (
 
 const cronDelegationRebuildHint = "该定时任务缺少可验证的用户委托身份，请在当前会话中重新创建该定时任务后重试。"
 
-// JobExecutor is the interface for executing cron jobs through the agent
-type JobExecutor interface {
-	ProcessDirectWithChannel(ctx context.Context, content, sessionKey, channel, chatID, senderID string) (string, error)
-}
-
 // CronTool provides scheduling capabilities for the agent
 type CronTool struct {
 	cronService *cron.CronService
-	executor    JobExecutor
 	msgBus      *bus.MessageBus
 	execTool    *ExecTool
 }
@@ -30,7 +24,7 @@ type CronTool struct {
 // NewCronTool creates a new CronTool
 // execTimeout: 0 means no timeout, >0 sets the timeout duration
 func NewCronTool(
-	cronService *cron.CronService, executor JobExecutor, msgBus *bus.MessageBus, workspace string, restrict bool,
+	cronService *cron.CronService, msgBus *bus.MessageBus, workspace string, restrict bool,
 	execTimeout time.Duration, config *config.Config,
 ) (*CronTool, error) {
 	execTool, err := NewExecToolWithConfig(workspace, restrict, config)
@@ -41,7 +35,6 @@ func NewCronTool(
 	execTool.SetTimeout(execTimeout)
 	return &CronTool{
 		cronService: cronService,
-		executor:    executor,
 		msgBus:      msgBus,
 		execTool:    execTool,
 	}, nil
@@ -308,11 +301,13 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 
 		pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer pubCancel()
-		t.msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
+		if err := t.msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
 			Channel: channel,
 			ChatID:  chatID,
 			Content: output,
-		})
+		}); err != nil {
+			return fmt.Sprintf("Error: publish cron command result failed: %v", err)
+		}
 		return "ok"
 	}
 
@@ -320,36 +315,36 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 	if job.Payload.Deliver {
 		pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer pubCancel()
-		t.msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
+		if err := t.msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
 			Channel: channel,
 			ChatID:  chatID,
 			Content: job.Payload.Message,
-		})
+		}); err != nil {
+			return fmt.Sprintf("Error: publish cron direct delivery failed: %v", err)
+		}
 		return "ok"
 	}
 
-	// For deliver=false, process through agent (for complex tasks)
+	// 中文注释：deliver=false 改为回灌标准 inbound 队列，复用与真实用户消息一致的处理路径。
+	// 这样响应会由 AgentLoop.Run 主循环统一发布到 outbound，避免“仅有 Response 日志但未回消息”。
 	sessionKey := fmt.Sprintf("cron-%s", job.ID)
 	effectiveSenderID, delegationErr := t.resolveDelegatedSender(job, channel, chatID)
 	if delegationErr != nil {
 		return fmt.Sprintf("Error: %v", delegationErr)
 	}
 
-	// Call agent with job's message
-	response, err := t.executor.ProcessDirectWithChannel(
-		ctx,
-		job.Payload.Message,
-		sessionKey,
-		channel,
-		chatID,
-		effectiveSenderID,
-	)
-	if err != nil {
-		return fmt.Sprintf("Error: %v", err)
+	pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer pubCancel()
+	if err := t.msgBus.PublishInbound(pubCtx, bus.InboundMessage{
+		Channel:    channel,
+		SenderID:   effectiveSenderID,
+		ChatID:     chatID,
+		Content:    job.Payload.Message,
+		SessionKey: sessionKey,
+	}); err != nil {
+		return fmt.Sprintf("Error: publish cron inbound failed: %v", err)
 	}
 
-	// Response is automatically sent via MessageBus by AgentLoop
-	_ = response // Will be sent by AgentLoop
 	return "ok"
 }
 
